@@ -3,8 +3,10 @@ package main
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/isaacphi/mcp-language-server/internal/tools"
+	"github.com/isaacphi/mcp-language-server/internal/tools/router"
 	"github.com/mark3labs/mcp-go/mcp"
 )
 
@@ -503,6 +505,172 @@ func (s *mcpServer) registerTools() error {
 		return mcp.NewToolResultText(text), nil
 	})
 
+	// Unified search router
+	searchRouter := router.NewRouter(s.config.workspaceDir)
+
+	searchTool := mcp.NewTool("search",
+		mcp.WithDescription("Unified search across all layers. Use this as the primary search tool. Specify strategy='auto' for intelligent routing or use 'text'/'ast'/'symbol' to explicitly choose a layer."),
+		mcp.WithString("query",
+			mcp.Required(),
+			mcp.Description("What to search for"),
+		),
+		mcp.WithString("strategy",
+			mcp.Description("Search strategy: 'auto' (intelligent routing), 'text' (ripgrep), 'ast' (tree-sitter), 'symbol' (LSP). Default: auto"),
+			mcp.DefaultString("auto"),
+		),
+		mcp.WithString("intent",
+			mcp.Description("Hint about what you're looking for: 'todo', 'function', 'struct', 'definition', 'reference', 'type', etc. Helps auto-routing."),
+		),
+		mcp.WithString("filePath",
+			mcp.Description("Limit search to a specific file"),
+		),
+		mcp.WithString("language",
+			mcp.Description("Language for AST search: 'c' or 'cpp' (default: auto-detect)"),
+		),
+	)
+
+	s.mcpServer.AddTool(searchTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		query, ok := request.Params.Arguments["query"].(string)
+		if !ok {
+			return mcp.NewToolResultError("query must be a string"), nil
+		}
+
+		opts := router.SearchOptions{
+			Query: query,
+		}
+
+		if v, ok := request.Params.Arguments["strategy"].(string); ok {
+			opts.Strategy = v
+		}
+		if v, ok := request.Params.Arguments["intent"].(string); ok {
+			opts.Intent = v
+		}
+		if v, ok := request.Params.Arguments["filePath"].(string); ok {
+			opts.FilePath = v
+		}
+		if v, ok := request.Params.Arguments["language"].(string); ok {
+			opts.Language = v
+		}
+
+		coreLogger.Debug("Executing unified search: query=%s strategy=%s intent=%s", query, opts.Strategy, opts.Intent)
+		results, err := searchRouter.Search(s.ctx, opts)
+		if err != nil {
+			coreLogger.Error("Search failed: %v", err)
+			return mcp.NewToolResultError(fmt.Sprintf("search failed: %v", err)), nil
+		}
+
+		return formatSearchResults(results), nil
+	})
+
+	// Explicit layer tools (for code dispatch)
+	searchTextTool := mcp.NewTool("search_text",
+		mcp.WithDescription("Force L1 text search using ripgrep. Use for text patterns, TODO comments, strings."),
+		mcp.WithString("query",
+			mcp.Required(),
+			mcp.Description("Text pattern or regex to search"),
+		),
+		mcp.WithString("filePath",
+			mcp.Description("Limit to specific file"),
+		),
+	)
+
+	s.mcpServer.AddTool(searchTextTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		query, ok := request.Params.Arguments["query"].(string)
+		if !ok {
+			return mcp.NewToolResultError("query must be a string"), nil
+		}
+
+		opts := router.SearchOptions{Query: query, Strategy: "text"}
+		if v, ok := request.Params.Arguments["filePath"].(string); ok {
+			opts.FilePath = v
+		}
+
+		results, err := searchRouter.Search(ctx, opts)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("search failed: %v", err)), nil
+		}
+		return formatSearchResults(results), nil
+	})
+
+	searchASTTool := mcp.NewTool("search_ast",
+		mcp.WithDescription("Force L2 AST search using tree-sitter. Use for structural patterns, function definitions, AST node types."),
+		mcp.WithString("query",
+			mcp.Required(),
+			mcp.Description("CSP query pattern (e.g., '(function_definition) @func')"),
+		),
+		mcp.WithString("filePath",
+			mcp.Description("Limit to specific file"),
+		),
+		mcp.WithString("language",
+			mcp.Description("Language: 'c' or 'cpp'"),
+		),
+	)
+
+	s.mcpServer.AddTool(searchASTTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		query, ok := request.Params.Arguments["query"].(string)
+		if !ok {
+			return mcp.NewToolResultError("query must be a string"), nil
+		}
+
+		opts := router.SearchOptions{Query: query, Strategy: "ast"}
+		if v, ok := request.Params.Arguments["filePath"].(string); ok {
+			opts.FilePath = v
+		}
+		if v, ok := request.Params.Arguments["language"].(string); ok {
+			opts.Language = v
+		}
+
+		results, err := searchRouter.Search(ctx, opts)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("search failed: %v", err)), nil
+		}
+		return formatSearchResults(results), nil
+	})
+
+	searchSymbolTool := mcp.NewTool("search_symbol",
+		mcp.WithDescription("Force L3 symbol search using LSP. Use for symbol definitions, references, and semantic understanding."),
+		mcp.WithString("query",
+			mcp.Required(),
+			mcp.Description("Symbol name to search"),
+		),
+		mcp.WithString("filePath",
+			mcp.Description("Limit to specific file"),
+		),
+	)
+
+	s.mcpServer.AddTool(searchSymbolTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		query, ok := request.Params.Arguments["query"].(string)
+		if !ok {
+			return mcp.NewToolResultError("query must be a string"), nil
+		}
+
+		opts := router.SearchOptions{Query: query, Strategy: "symbol"}
+		if v, ok := request.Params.Arguments["filePath"].(string); ok {
+			opts.FilePath = v
+		}
+
+		results, err := searchRouter.Search(ctx, opts)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("search failed: %v", err)), nil
+		}
+		return formatSearchResults(results), nil
+	})
+
 	coreLogger.Info("Successfully registered all MCP tools")
 	return nil
+}
+
+func formatSearchResults(results []router.SearchResult) *mcp.CallToolResult {
+	if len(results) == 0 {
+		return mcp.NewToolResultText("No results found")
+	}
+
+	var b strings.Builder
+	for _, r := range results {
+		b.WriteString(fmt.Sprintf("=== [%s layer] (%d results) ===\n", r.Layer, r.Count))
+		b.WriteString(r.Content)
+		b.WriteString("\n\n")
+	}
+
+	return mcp.NewToolResultText(b.String())
 }
