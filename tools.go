@@ -427,6 +427,82 @@ func (s *mcpServer) registerTools() error {
 		return mcp.NewToolResultText(text), nil
 	})
 
+	treesitterQueryTool := mcp.NewTool("treesitter_query",
+		mcp.WithDescription("Query the AST using tree-sitter CSP patterns. Use this for structural pattern matching like finding all function definitions, specific AST node types, or complex tree patterns."),
+		mcp.WithString("query",
+			mcp.Required(),
+			mcp.Description("CSP query pattern (e.g., '(function_definition) @func' to find all functions)"),
+		),
+		mcp.WithString("filePath",
+			mcp.Description("Path to a specific file to query. If not provided, queries all C/C++ files in the workspace"),
+		),
+		mcp.WithString("language",
+			mcp.Description("Language: 'c' or 'cpp' (auto-detected from file extension if filePath provided)"),
+		),
+	)
+
+	s.mcpServer.AddTool(treesitterQueryTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		query, ok := request.Params.Arguments["query"].(string)
+		if !ok {
+			return mcp.NewToolResultError("query must be a string"), nil
+		}
+
+		var filePath, language string
+		if v, ok := request.Params.Arguments["filePath"].(string); ok {
+			filePath = v
+		}
+		if v, ok := request.Params.Arguments["language"].(string); ok {
+			language = v
+		}
+
+		coreLogger.Debug("Executing treesitter_query: %s", query)
+		text, err := tools.RunTreesitterQuery(s.ctx, s.config.workspaceDir, query, filePath, language)
+		if err != nil {
+			coreLogger.Error("Failed to run tree-sitter query: %v", err)
+			return mcp.NewToolResultError(fmt.Sprintf("failed to run query: %v", err)), nil
+		}
+		return mcp.NewToolResultText(text), nil
+	})
+
+	treesitterASTTool := mcp.NewTool("treesitter_ast",
+		mcp.WithDescription("Get the AST (Abstract Syntax Tree) structure of a C/C++ file. Useful for exploring the syntactic structure and finding specific node types."),
+		mcp.WithString("filePath",
+			mcp.Required(),
+			mcp.Description("Path to the file to analyze"),
+		),
+		mcp.WithString("nodeType",
+			mcp.Description("Filter to only show nodes of this type (e.g., 'function_definition', 'struct_specifier')"),
+		),
+		mcp.WithNumber("maxDepth",
+			mcp.Description("Maximum tree depth to traverse (default: 10)"),
+		),
+	)
+
+	s.mcpServer.AddTool(treesitterASTTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		filePath, ok := request.Params.Arguments["filePath"].(string)
+		if !ok {
+			return mcp.NewToolResultError("filePath must be a string"), nil
+		}
+
+		var nodeType string
+		if v, ok := request.Params.Arguments["nodeType"].(string); ok {
+			nodeType = v
+		}
+
+		maxDepth := 10
+		if v, ok := request.Params.Arguments["maxDepth"].(float64); ok {
+			maxDepth = int(v)
+		}
+
+		coreLogger.Debug("Executing treesitter_ast for file: %s", filePath)
+		text, err := tools.GetAST(s.ctx, filePath, nodeType, maxDepth)
+		if err != nil {
+			coreLogger.Error("Failed to get AST: %v", err)
+			return mcp.NewToolResultError(fmt.Sprintf("failed to get AST: %v", err)), nil
+		}
+		return mcp.NewToolResultText(text), nil
+	})
+
 	coreLogger.Info("Successfully registered all MCP tools")
 	return nil
 }
