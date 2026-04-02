@@ -656,6 +656,107 @@ func (s *mcpServer) registerTools() error {
 		return formatSearchResults(results), nil
 	})
 
+	// Call hierarchy tools
+	callersTool := mcp.NewTool("callers",
+		mcp.WithDescription("Find functions that call the function at the specified position (incoming call hierarchy)."),
+		mcp.WithString("filePath",
+			mcp.Required(),
+			mcp.Description("Path to the file containing the function"),
+		),
+		mcp.WithNumber("line",
+			mcp.Required(),
+			mcp.Description("Line number where the function is located (1-indexed)"),
+		),
+		mcp.WithNumber("column",
+			mcp.Required(),
+			mcp.Description("Column number where the function is located (1-indexed)"),
+		),
+	)
+
+	s.mcpServer.AddTool(callersTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		filePath, ok := request.Params.Arguments["filePath"].(string)
+		if !ok {
+			return mcp.NewToolResultError("filePath must be a string"), nil
+		}
+
+		var line, column int
+		switch v := request.Params.Arguments["line"].(type) {
+		case float64:
+			line = int(v)
+		case int:
+			line = v
+		default:
+			return mcp.NewToolResultError("line must be a number"), nil
+		}
+
+		switch v := request.Params.Arguments["column"].(type) {
+		case float64:
+			column = int(v)
+		case int:
+			column = v
+		default:
+			return mcp.NewToolResultError("column must be a number"), nil
+		}
+
+		coreLogger.Debug("Executing callers for %s:%d:%d", filePath, line, column)
+		text, err := tools.GetCallers(s.ctx, s.lspClient, filePath, line, column)
+		if err != nil {
+			coreLogger.Error("Failed to get callers: %v", err)
+			return mcp.NewToolResultError(fmt.Sprintf("failed to get callers: %v", err)), nil
+		}
+		return mcp.NewToolResultText(text), nil
+	})
+
+	calleesTool := mcp.NewTool("callees",
+		mcp.WithDescription("Find functions that are called by the function at the specified position (outgoing call hierarchy)."),
+		mcp.WithString("filePath",
+			mcp.Required(),
+			mcp.Description("Path to the file containing the function"),
+		),
+		mcp.WithNumber("line",
+			mcp.Required(),
+			mcp.Description("Line number where the function is located (1-indexed)"),
+		),
+		mcp.WithNumber("column",
+			mcp.Required(),
+			mcp.Description("Column number where the function is located (1-indexed)"),
+		),
+	)
+
+	s.mcpServer.AddTool(calleesTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		filePath, ok := request.Params.Arguments["filePath"].(string)
+		if !ok {
+			return mcp.NewToolResultError("filePath must be a string"), nil
+		}
+
+		var line, column int
+		switch v := request.Params.Arguments["line"].(type) {
+		case float64:
+			line = int(v)
+		case int:
+			line = v
+		default:
+			return mcp.NewToolResultError("line must be a number"), nil
+		}
+
+		switch v := request.Params.Arguments["column"].(type) {
+		case float64:
+			column = int(v)
+		case int:
+			column = v
+		default:
+			return mcp.NewToolResultError("column must be a number"), nil
+		}
+
+		coreLogger.Debug("Executing callees for %s:%d:%d", filePath, line, column)
+		text, err := tools.GetCallees(s.ctx, s.lspClient, filePath, line, column)
+		if err != nil {
+			coreLogger.Error("Failed to get callees: %v", err)
+			return mcp.NewToolResultError(fmt.Sprintf("failed to get callees: %v", err)), nil
+		}
+		return mcp.NewToolResultText(text), nil
+	})
+
 	coreLogger.Info("Successfully registered all MCP tools")
 	return nil
 }
