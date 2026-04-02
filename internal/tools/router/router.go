@@ -4,8 +4,10 @@ import (
 	"context"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/isaacphi/mcp-language-server/internal/tools"
+	"github.com/isaacphi/mcp-language-server/internal/tools/cache"
 )
 
 // Router 搜索路由器，根据策略将搜索请求分发到不同的搜索层
@@ -15,7 +17,8 @@ import (
 //   - L2 (ast): tree-sitter AST 查询，支持结构化搜索
 //   - L3 (symbol): LSP 符号搜索，语义理解
 type Router struct {
-	workspaceDir string // 工作区目录路径
+	workspaceDir string                    // 工作区目录路径
+	cache       *cache.SearchResultCache // 搜索结果缓存
 }
 
 // SearchOptions 搜索选项
@@ -34,9 +37,34 @@ type SearchResult struct {
 	Count   int    // 结果数量
 }
 
+// defaultCacheTTL 默认缓存过期时间（秒）
+const defaultCacheTTL = 300 // 5分钟
+
 // NewRouter 创建新的搜索路由器
+//
+// 参数:
+//   - workspaceDir: 工作区目录路径
+//
+// 返回: 路由器指针
 func NewRouter(workspaceDir string) *Router {
-	return &Router{workspaceDir: workspaceDir}
+	return &Router{
+		workspaceDir: workspaceDir,
+		cache:        cache.NewSearchResultCache(time.Duration(defaultCacheTTL) * time.Second),
+	}
+}
+
+// NewRouterWithCache 创建带缓存的搜索路由器
+//
+// 参数:
+//   - workspaceDir: 工作区目录路径
+//   - cacheTTLSeconds: 缓存过期时间（秒）
+//
+// 返回: 路由器指针
+func NewRouterWithCache(workspaceDir string, cacheTTLSeconds int64) *Router {
+	return &Router{
+		workspaceDir: workspaceDir,
+		cache:        cache.NewSearchResultCache(time.Duration(cacheTTLSeconds) * time.Second),
+	}
 }
 
 // Search 执行统一搜索
@@ -52,18 +80,55 @@ func (r *Router) Search(ctx context.Context, opts SearchOptions) ([]SearchResult
 		strategy = "auto"
 	}
 
+	// 生成缓存键
+	cacheKey := cache.SearchCacheKey(opts.Query, strategy, opts.FilePath, opts.Language)
+
+	// 尝试从缓存获取
+	if r.cache != nil {
+		if cached, found := r.cache.Get(cacheKey); found {
+			if results, ok := cached.([]SearchResult); ok {
+				return results, nil
+			}
+		}
+	}
+
+	var results []SearchResult
+	var err error
+
 	switch strategy {
 	case "text":
-		return r.searchText(ctx, opts)
+		results, err = r.searchText(ctx, opts)
 	case "ast":
-		return r.searchAST(ctx, opts)
+		results, err = r.searchAST(ctx, opts)
 	case "symbol":
-		return r.searchSymbol(ctx, opts)
+		results, err = r.searchSymbol(ctx, opts)
 	case "auto":
-		return r.searchAuto(ctx, opts)
+		results, err = r.searchAuto(ctx, opts)
 	default:
-		return r.searchAuto(ctx, opts)
+		results, err = r.searchAuto(ctx, opts)
 	}
+
+	// 缓存结果
+	if err == nil && r.cache != nil {
+		r.cache.Set(cacheKey, results, 0)
+	}
+
+	return results, err
+}
+
+// ClearCache 清空搜索缓存
+func (r *Router) ClearCache() {
+	if r.cache != nil {
+		r.cache.Clear()
+	}
+}
+
+// CacheSize 返回缓存大小
+func (r *Router) CacheSize() int {
+	if r.cache != nil {
+		return r.cache.Size()
+	}
+	return 0
 }
 
 // searchText 使用 L1 ripgrep 进行文本搜索
