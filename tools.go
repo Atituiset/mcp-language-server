@@ -363,6 +363,70 @@ func (s *mcpServer) registerTools() error {
 		return mcp.NewToolResultText(text), nil
 	})
 
+	ripgrepTool := mcp.NewTool("ripgrep",
+		mcp.WithDescription("Search for text patterns in files using ripgrep. Faster than LSP-based search but does not understand language semantics."),
+		mcp.WithString("pattern",
+			mcp.Required(),
+			mcp.Description("The regex pattern to search for"),
+		),
+		mcp.WithBoolean("caseSensitive",
+			mcp.Description("Case sensitive search (default: false)"),
+		),
+		mcp.WithBoolean("wholeWord",
+			mcp.Description("Match whole words only (default: false)"),
+		),
+		mcp.WithNumber("maxCount",
+			mcp.Description("Maximum number of matches per file (default: 100)"),
+		),
+		mcp.WithNumber("contextLines",
+			mcp.Description("Number of context lines around matches (default: 0)"),
+		),
+		mcp.WithString("fileType",
+			mcp.Description("Filter by file type (e.g., go, py, js, ts)"),
+		),
+		mcp.WithString("include",
+			mcp.Description("Glob pattern to include files (e.g., *.go)"),
+		),
+	)
+
+	s.mcpServer.AddTool(ripgrepTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		pattern, ok := request.Params.Arguments["pattern"].(string)
+		if !ok {
+			return mcp.NewToolResultError("pattern must be a string"), nil
+		}
+
+		opts := tools.RipgrepOptions{
+			MaxCount: 100,
+		}
+
+		if v, ok := request.Params.Arguments["caseSensitive"].(bool); ok {
+			opts.CaseSensitive = v
+		}
+		if v, ok := request.Params.Arguments["wholeWord"].(bool); ok {
+			opts.WholeWord = v
+		}
+		if v, ok := request.Params.Arguments["maxCount"].(float64); ok {
+			opts.MaxCount = int(v)
+		}
+		if v, ok := request.Params.Arguments["contextLines"].(float64); ok {
+			opts.ContextLines = int(v)
+		}
+		if v, ok := request.Params.Arguments["fileType"].(string); ok {
+			opts.FileType = v
+		}
+		if v, ok := request.Params.Arguments["include"].(string); ok {
+			opts.Include = v
+		}
+
+		coreLogger.Debug("Executing ripgrep for pattern: %s", pattern)
+		text, err := tools.SearchCode(s.ctx, s.config.workspaceDir, pattern, opts)
+		if err != nil {
+			coreLogger.Error("Failed to search: %v", err)
+			return mcp.NewToolResultError(fmt.Sprintf("failed to search: %v", err)), nil
+		}
+		return mcp.NewToolResultText(text), nil
+	})
+
 	coreLogger.Info("Successfully registered all MCP tools")
 	return nil
 }
