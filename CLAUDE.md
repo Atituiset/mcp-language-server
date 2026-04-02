@@ -2,7 +2,14 @@
 
 ## 项目概述
 
-这是一个 **MCP (Model Context Protocol) 服务器**，用于向 LLM 暴露 Language Server Protocol (LSP) 功能。它作为桥接层，让 MCP 客户端（如 Claude Desktop）能够通过语义工具（定义查找、引用查找、重命名、悬停信息等）导航代码库。
+这是一个 **MCP (Model Context Protocol) 服务器**，用于向 LLM 暴露代码上下文提取能力。本工具是 **LLM 辅助代码分析的上下文提取器**，而非直接的分析工具。它帮助 LLM 获取代码的语义信息（定义、引用、调用关系、结构信息等），由 LLM 进行最终的安全检视和分析。
+
+**典型用途**：百万级 C/C++ 代码库的安全漏洞检视
+
+**工作流**：
+```
+代码库 → 本工具提取上下文 → LLM 分析 → 安全报告
+```
 
 **Go 版本**: 1.24.0
 
@@ -337,13 +344,30 @@ mcp-language-server --workspace /path/to/project --lsp gopls
 
 ---
 
+## 典型用法：LLM 辅助安全检视
+
+```
+用户: "检查 main.cpp 中的 getUserInput 函数是否有安全漏洞"
+
+工具链:
+1. definition("getUserInput")           → 获取函数定义和实现
+2. callers("main.cpp", line, col, depth=3)  → 提取上游调用链
+3. callees("main.cpp", line, col, depth=2)   → 提取下游函数调用
+4. find_struct_usage("UserData")       → 查找相关结构体使用
+
+组合上下文 → 发送给 LLM → LLM 输出安全分析报告
+```
+
+---
+
 ## 架构设计亮点
 
-1. **三层搜索架构**: ripgrep (L1) + tree-sitter (L2) + LSP (L3)，平衡速度与语义
-2. **智能路由**: 统一入口，自动选择最佳搜索层
-3. **进程分离**: LSP 服务器作为子进程，通过 stdio 通信
-4. **代码生成**: LSP 协议类型自动从 vscode-languageserver-node 生成
-5. **优雅关闭**: 多层关闭机制（信号、父进程监控、超时）
-6. **内存缓存**: 诊断结果和打开文件状态缓存
-7. **Debounce**: 文件变化通知防抖
-8. **Gitignore 支持**: 自动排除不需要监视的文件
+1. **上下文提取定位**: 本工具专注提取代码上下文（定义、引用、调用关系、AST 结构），由 LLM 负责安全分析
+2. **三层搜索架构**: ripgrep (L1) + tree-sitter (L2) + LSP (L3)，平衡速度与语义
+3. **智能路由**: 统一入口，自动选择最佳搜索层
+4. **进程分离**: LSP 服务器作为子进程，通过 stdio 通信
+5. **代码生成**: LSP 协议类型自动从 vscode-languageserver-node 生成
+6. **优雅关闭**: 多层关闭机制（信号、父进程监控、超时）
+7. **内存缓存**: 诊断结果和打开文件状态缓存
+8. **Debounce**: 文件变化通知防抖
+9. **Gitignore 支持**: 自动排除不需要监视的文件
