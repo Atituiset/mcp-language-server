@@ -785,6 +785,81 @@ func (s *mcpServer) registerTools() error {
 		return mcp.NewToolResultText(text), nil
 	})
 
+	// Struct usage tools
+	findStructUsageTool := mcp.NewTool("find_struct_usage",
+		mcp.WithDescription("Find all usages of a C/C++ struct type (variable declarations, function parameters, return types, etc.)."),
+		mcp.WithString("structName",
+			mcp.Required(),
+			mcp.Description("Name of the struct to search for"),
+		),
+		mcp.WithString("filePath",
+			mcp.Description("Limit search to a specific file"),
+		),
+		mcp.WithString("language",
+			mcp.Description("Language: 'c' or 'cpp' (default: cpp)"),
+		),
+	)
+
+	s.mcpServer.AddTool(findStructUsageTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		structName, ok := request.Params.Arguments["structName"].(string)
+		if !ok {
+			return mcp.NewToolResultError("structName must be a string"), nil
+		}
+
+		var filePath, language string
+		if v, ok := request.Params.Arguments["filePath"].(string); ok {
+			filePath = v
+		}
+		if v, ok := request.Params.Arguments["language"].(string); ok {
+			language = v
+		}
+
+		coreLogger.Debug("Executing find_struct_usage for: %s", structName)
+		text, err := tools.FindStructUsage(s.ctx, s.config.workspaceDir, structName, filePath, language)
+		if err != nil {
+			coreLogger.Error("Failed to find struct usage: %v", err)
+			return mcp.NewToolResultError(fmt.Sprintf("failed to find struct usage: %v", err)), nil
+		}
+		return mcp.NewToolResultText(text), nil
+	})
+
+	findStructDefinitionTool := mcp.NewTool("find_struct_definition",
+		mcp.WithDescription("Find the definition/declaration of a C/C++ struct type."),
+		mcp.WithString("structName",
+			mcp.Required(),
+			mcp.Description("Name of the struct to find"),
+		),
+		mcp.WithString("filePath",
+			mcp.Description("Limit search to a specific file"),
+		),
+		mcp.WithString("language",
+			mcp.Description("Language: 'c' or 'cpp' (default: cpp)"),
+		),
+	)
+
+	s.mcpServer.AddTool(findStructDefinitionTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		structName, ok := request.Params.Arguments["structName"].(string)
+		if !ok {
+			return mcp.NewToolResultError("structName must be a string"), nil
+		}
+
+		var filePath, language string
+		if v, ok := request.Params.Arguments["filePath"].(string); ok {
+			filePath = v
+		}
+		if v, ok := request.Params.Arguments["language"].(string); ok {
+			language = v
+		}
+
+		coreLogger.Debug("Executing find_struct_definition for: %s", structName)
+		text, err := tools.FindStructDefinition(s.ctx, s.config.workspaceDir, structName, filePath, language)
+		if err != nil {
+			coreLogger.Error("Failed to find struct definition: %v", err)
+			return mcp.NewToolResultError(fmt.Sprintf("failed to find struct definition: %v", err)), nil
+		}
+		return mcp.NewToolResultText(text), nil
+	})
+
 	coreLogger.Info("Successfully registered all MCP tools")
 	return nil
 }
