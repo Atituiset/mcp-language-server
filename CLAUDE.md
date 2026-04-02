@@ -33,6 +33,9 @@
 | `github.com/davecgh/go-spew` | v1.1.1 | 调试输出 |
 | `github.com/stretchr/testify` | v1.10.0 | 测试框架（断言） |
 | `golang.org/x/text` | v0.25.0 | 文本处理（Unicode 等） |
+| `github.com/smacker/go-tree-sitter` | latest | **Tree-sitter AST 解析** |
+| `github.com/smacker/go-tree-sitter/c` | latest | **C 语言解析器** |
+| `github.com/smacker/go-tree-sitter/cpp` | latest | **C++ 语言解析器** |
 
 ### LSP 协议来源
 
@@ -75,15 +78,25 @@ mcp-language-server/
 │   │   └── tables.go          # 查找表
 │   │
 │   ├── tools/                # MCP 工具实现
-│   │   ├── definition.go     # 符号定义查找
-│   │   ├── references.go      # 引用查找
+│   │   ├── definition.go     # 符号定义查找 (L3)
+│   │   ├── references.go      # 引用查找 (L3)
 │   │   ├── diagnostics.go     # 诊断信息
 │   │   ├── hover.go           # 悬停信息
 │   │   ├── rename-symbol.go   # 重命名符号
 │   │   ├── edit_file.go       # 文本编辑
 │   │   ├── get-codelens.go    # CodeLens 获取
 │   │   ├── execute-codelens.go # CodeLens 执行
-│   │   └── utilities.go       # 工具函数
+│   │   ├── ripgrep.go        # 文本搜索 (L1)
+│   │   ├── treesitter.go      # Tree-sitter 包装 (L2)
+│   │   ├── call_hierarchy.go  # 调用层级查询 (L3)
+│   │   ├── find_struct_usage.go # 结构体使用查询 (L2)
+│   │   ├── router/           # 搜索路由
+│   │   │   └── router.go     # 统一搜索路由器
+│   │   └── treesitter/       # Tree-sitter 核心
+│   │       ├── parser.go     # 解析器
+│   │       ├── query.go      # CSP 查询
+│   │       ├── ast.go        # AST 工具
+│   │       └── cursor.go     # TreeCursor 工具
 │   │
 │   ├── watcher/             # 文件系统监视器
 │   │   ├── watcher.go        # 核心逻辑 (fsnotify)
@@ -104,15 +117,91 @@ mcp-language-server/
 
 ---
 
+## 分层搜索架构
+
+本项目采用三层搜索架构，平衡速度和语义深度：
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    统一搜索入口 (search)                       │
+│              模型自主选择 或 自动智能路由                         │
+└─────────────────────┬───────────────────────────────────────┘
+                      │
+          ┌───────────┼───────────┐
+          │           │           │
+    ┌─────▼─────┐ ┌───▼────┐ ┌───▼──────┐
+    │    L1     │ │   L2   │ │    L3    │
+    │  ripgrep  │ │tree-   │ │   LSP    │
+    │  (文本)   │ │sitter  │ │ (符号)   │
+    │   ⚡⚡⚡   │ │ (AST)  │ │   🐢    │
+    │           │ │  ⚡⚡   │ │         │
+    └───────────┘ └────────┘ └──────────┘
+```
+
+### 各层说明
+
+| 层级 | 工具 | 速度 | 用途 |
+|------|------|------|------|
+| **L1** | `ripgrep` / `search_text` | ⚡⚡⚡ 最快 | 文本/正则搜索、TODO、注释 |
+| **L2** | `treesitter_query` / `search_ast` / `find_struct_usage` | ⚡⚡ 快 | AST 结构查询、CSP 模式、结构体分析 |
+| **L3** | `definition` / `references` / `callers` / `callees` / `search_symbol` | 🐢 较慢 | 语义理解、符号定义、调用层级 |
+
+### 路由策略
+
+```
+search(query, strategy="auto", intent="...")
+
+Auto 路由规则:
+├── intent 包含 "todo"/"comment"/"string" → L1 text
+├── intent 包含 "function"/"struct"/"class" → L2 ast
+├── intent 包含 "definition"/"reference"/"type" → L3 symbol
+└── 无 intent → 并行搜索所有层
+```
+
+---
+
 ## MCP 工具列表
+
+### 统一搜索（推荐）
+
+| 工具 | 功能 | 层级 |
+|------|------|------|
+| `search` | 统一搜索入口，支持自动路由 | L1/L2/L3 |
+| `search_text` | 强制 L1 文本搜索 | L1 |
+| `search_ast` | 强制 L2 AST 查询 | L2 |
+| `search_symbol` | 强制 L3 符号搜索 | L3 |
+
+### L1: 文本搜索
+
+| 工具 | 功能 |
+|------|------|
+| `ripgrep` | 快速文本/正则搜索 |
+
+### L2: AST 查询
+
+| 工具 | 功能 |
+|------|------|
+| `treesitter_query` | CSP 模式查询 AST |
+| `treesitter_ast` | 查看文件 AST 结构 |
+| `find_struct_usage` | 查找结构体使用位置 |
+| `find_struct_definition` | 查找结构体定义 |
+
+### L3: LSP 语义
 
 | 工具 | 功能 |
 |------|------|
 | `definition` | 查找符号定义位置 |
 | `references` | 查找符号所有引用 |
-| `diagnostics` | 获取文件诊断信息（错误/警告） |
-| `hover` | 获取悬停信息（类型、文档） |
+| `callers` | 查找调用当前函数的函数（支持 depth） |
+| `callees` | 查找当前函数调用的函数（支持 depth） |
+| `diagnostics` | 获取文件诊断信息 |
+| `hover` | 获取悬停信息 |
 | `rename_symbol` | 重命名符号 |
+
+### 其他
+
+| 工具 | 功能 |
+|------|------|
 | `edit_file` | 多重文本编辑 |
 
 ---
@@ -151,6 +240,32 @@ JSON-RPC 2.0 格式：
 **高级特性**:
 - `textDocument/semanticTokens` / `callHierarchy` / `typeHierarchy`
 - `textDocument/diagnostic`
+- `callHierarchy/incomingCalls` / `callHierarchy/outgoingCalls`
+
+---
+
+## Tree-sitter 支持
+
+### 支持语言
+
+- **C** (`github.com/smacker/go-tree-sitter/c`)
+- **C++** (`github.com/smacker/go-tree-sitter/cpp`)
+
+### CSP 查询示例
+
+```scheme
+; 查找所有函数定义
+(function_definition) @func
+
+; 查找特定名称的函数
+((identifier) @name (#eq? @name "main"))
+
+; 查找结构体定义
+(struct_specifier) @struct
+
+; 查找类型使用
+(type_identifier) @type
+```
 
 ---
 
@@ -224,9 +339,11 @@ mcp-language-server --workspace /path/to/project --lsp gopls
 
 ## 架构设计亮点
 
-1. **进程分离**: LSP 服务器作为子进程，通过 stdio 通信
-2. **代码生成**: LSP 协议类型自动从 vscode-languageserver-node 生成
-3. **优雅关闭**: 多层关闭机制（信号、父进程监控、超时）
-4. **内存缓存**: 诊断结果和打开文件状态缓存
-5. **Debounce**: 文件变化通知防抖
-6. **Gitignore 支持**: 自动排除不需要监视的文件
+1. **三层搜索架构**: ripgrep (L1) + tree-sitter (L2) + LSP (L3)，平衡速度与语义
+2. **智能路由**: 统一入口，自动选择最佳搜索层
+3. **进程分离**: LSP 服务器作为子进程，通过 stdio 通信
+4. **代码生成**: LSP 协议类型自动从 vscode-languageserver-node 生成
+5. **优雅关闭**: 多层关闭机制（信号、父进程监控、超时）
+6. **内存缓存**: 诊断结果和打开文件状态缓存
+7. **Debounce**: 文件变化通知防抖
+8. **Gitignore 支持**: 自动排除不需要监视的文件
