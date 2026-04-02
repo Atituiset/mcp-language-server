@@ -3,15 +3,26 @@ package tools
 import (
 	"context"
 	"fmt"
-	"os"
 	"strings"
 
 	"github.com/isaacphi/mcp-language-server/internal/lsp"
 	"github.com/isaacphi/mcp-language-server/internal/protocol"
 )
 
-// GetCallers finds functions that call the function at the given position
-func GetCallers(ctx context.Context, client *lsp.Client, filePath string, line, column int) (string, error) {
+type CallResult struct {
+	Name     string
+	FilePath string
+	Line     int
+	Column   int
+	Depth    int
+}
+
+// GetCallers finds functions that call the function at the given position, up to specified depth
+func GetCallers(ctx context.Context, client *lsp.Client, filePath string, line, column, depth int) (string, error) {
+	if depth <= 0 {
+		depth = 1
+	}
+
 	// Open file if not already open
 	if err := client.OpenFile(ctx, filePath); err != nil {
 		return "", fmt.Errorf("failed to open file: %w", err)
@@ -34,10 +45,37 @@ func GetCallers(ctx context.Context, client *lsp.Client, filePath string, line, 
 		return "No call hierarchy items found at this position", nil
 	}
 
-	// Get incoming calls (callers)
-	var results []string
+	// Collect all items at initial position
+	var startItems []*protocol.CallHierarchyItem
+	for i := range items {
+		startItems = append(startItems, &items[i])
+	}
+
+	// Recursively find callers up to depth
+	seen := make(map[string]bool) // Track seen items to avoid cycles
+	var results []CallResult
+
+	for _, item := range startItems {
+		key := itemKey(item)
+		seen[key] = true
+	}
+
+	collectCallers(ctx, client, startItems, depth, 1, seen, &results)
+
+	if len(results) == 0 {
+		return "No callers found", nil
+	}
+
+	return formatCallResultsWithDepth(results, "Callers", depth), nil
+}
+
+func collectCallers(ctx context.Context, client *lsp.Client, items []*protocol.CallHierarchyItem, maxDepth, currentDepth int, seen map[string]bool, results *[]CallResult) {
+	if currentDepth > maxDepth || len(items) == 0 {
+		return
+	}
+
 	for _, item := range items {
-		incomingParams := protocol.CallHierarchyIncomingCallsParams{Item: item}
+		incomingParams := protocol.CallHierarchyIncomingCallsParams{Item: *item}
 		incomingCalls, err := client.IncomingCalls(ctx, incomingParams)
 		if err != nil {
 			continue
@@ -45,19 +83,34 @@ func GetCallers(ctx context.Context, client *lsp.Client, filePath string, line, 
 
 		for _, call := range incomingCalls {
 			caller := call.From
-			results = append(results, formatCallHierarchyItem(&caller, "caller"))
+			key := itemKey(&caller)
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+
+			*results = append(*results, CallResult{
+				Name:     caller.Name,
+				FilePath: trimFileURI(string(caller.URI)),
+				Line:     int(caller.Range.Start.Line + 1),
+				Column:   int(caller.Range.Start.Character + 1),
+				Depth:    currentDepth,
+			})
+
+			// Recurse if not at max depth
+			if currentDepth < maxDepth {
+				collectCallers(ctx, client, []*protocol.CallHierarchyItem{&caller}, maxDepth, currentDepth+1, seen, results)
+			}
 		}
 	}
-
-	if len(results) == 0 {
-		return "No callers found", nil
-	}
-
-	return formatCallResults(results, "Callers"), nil
 }
 
-// GetCallees finds functions that are called by the function at the given position
-func GetCallees(ctx context.Context, client *lsp.Client, filePath string, line, column int) (string, error) {
+// GetCallees finds functions that are called by the function at the given position, up to specified depth
+func GetCallees(ctx context.Context, client *lsp.Client, filePath string, line, column, depth int) (string, error) {
+	if depth <= 0 {
+		depth = 1
+	}
+
 	// Open file if not already open
 	if err := client.OpenFile(ctx, filePath); err != nil {
 		return "", fmt.Errorf("failed to open file: %w", err)
@@ -80,10 +133,37 @@ func GetCallees(ctx context.Context, client *lsp.Client, filePath string, line, 
 		return "No call hierarchy items found at this position", nil
 	}
 
-	// Get outgoing calls (callees)
-	var results []string
+	// Collect all items at initial position
+	var startItems []*protocol.CallHierarchyItem
+	for i := range items {
+		startItems = append(startItems, &items[i])
+	}
+
+	// Recursively find callees up to depth
+	seen := make(map[string]bool) // Track seen items to avoid cycles
+	var results []CallResult
+
+	for _, item := range startItems {
+		key := itemKey(item)
+		seen[key] = true
+	}
+
+	collectCallees(ctx, client, startItems, depth, 1, seen, &results)
+
+	if len(results) == 0 {
+		return "No callees found", nil
+	}
+
+	return formatCallResultsWithDepth(results, "Callees", depth), nil
+}
+
+func collectCallees(ctx context.Context, client *lsp.Client, items []*protocol.CallHierarchyItem, maxDepth, currentDepth int, seen map[string]bool, results *[]CallResult) {
+	if currentDepth > maxDepth || len(items) == 0 {
+		return
+	}
+
 	for _, item := range items {
-		outgoingParams := protocol.CallHierarchyOutgoingCallsParams{Item: item}
+		outgoingParams := protocol.CallHierarchyOutgoingCallsParams{Item: *item}
 		outgoingCalls, err := client.OutgoingCalls(ctx, outgoingParams)
 		if err != nil {
 			continue
@@ -91,55 +171,55 @@ func GetCallees(ctx context.Context, client *lsp.Client, filePath string, line, 
 
 		for _, call := range outgoingCalls {
 			callee := call.To
-			results = append(results, formatCallHierarchyItem(&callee, "callee"))
+			key := itemKey(&callee)
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+
+			*results = append(*results, CallResult{
+				Name:     callee.Name,
+				FilePath: trimFileURI(string(callee.URI)),
+				Line:     int(callee.Range.Start.Line + 1),
+				Column:   int(callee.Range.Start.Character + 1),
+				Depth:    currentDepth,
+			})
+
+			// Recurse if not at max depth
+			if currentDepth < maxDepth {
+				collectCallees(ctx, client, []*protocol.CallHierarchyItem{&callee}, maxDepth, currentDepth+1, seen, results)
+			}
+		}
+	}
+}
+
+func itemKey(item *protocol.CallHierarchyItem) string {
+	return fmt.Sprintf("%s:%d:%d", string(item.URI), item.Range.Start.Line, item.Range.Start.Character)
+}
+
+func trimFileURI(uri string) string {
+	return strings.TrimPrefix(uri, "file://")
+}
+
+func formatCallResultsWithDepth(results []CallResult, title string, maxDepth int) string {
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("=== %s (depth 1-%d, %d total) ===\n\n", title, maxDepth, len(results)))
+
+	// Group by depth
+	depthGroups := make(map[int][]CallResult)
+	for _, r := range results {
+		depthGroups[r.Depth] = append(depthGroups[r.Depth], r)
+	}
+
+	for d := 1; d <= maxDepth; d++ {
+		if group, ok := depthGroups[d]; ok {
+			b.WriteString(fmt.Sprintf("--- Depth %d (%d functions) ---\n", d, len(group)))
+			for _, r := range group {
+				b.WriteString(fmt.Sprintf("  %s at %s:L%d:C%d\n", r.Name, r.FilePath, r.Line, r.Column))
+			}
+			b.WriteString("\n")
 		}
 	}
 
-	if len(results) == 0 {
-		return "No callees found", nil
-	}
-
-	return formatCallResults(results, "Callees"), nil
-}
-
-func formatCallHierarchyItem(item *protocol.CallHierarchyItem, role string) string {
-	name := item.Name
-	if name == "" {
-		name = "(anonymous)"
-	}
-
-	uri := strings.TrimPrefix(string(item.URI), "file://")
-	rangeStr := formatRange(&item.Range)
-
-	return fmt.Sprintf("%s: %s at %s:%s", role, name, uri, rangeStr)
-}
-
-func formatRange(r *protocol.Range) string {
-	return fmt.Sprintf("L%d:C%d", r.Start.Line+1, r.Start.Character+1)
-}
-
-func formatCallResults(results []string, title string) string {
-	var b strings.Builder
-	b.WriteString(fmt.Sprintf("=== %s (%d) ===\n\n", title, len(results)))
-	for _, r := range results {
-		b.WriteString(r)
-		b.WriteString("\n")
-	}
 	return b.String()
-}
-
-// ReadCallers reads file content for context
-func readFileContext(path string, startLine, endLine int) (string, error) {
-	content, err := os.ReadFile(path)
-	if err != nil {
-		return "", err
-	}
-	lines := strings.Split(string(content), "\n")
-	if startLine < 1 || startLine > len(lines) {
-		return "", fmt.Errorf("invalid line range")
-	}
-	if endLine > len(lines) {
-		endLine = len(lines)
-	}
-	return strings.Join(lines[startLine-1:endLine], "\n"), nil
 }

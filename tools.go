@@ -671,6 +671,9 @@ func (s *mcpServer) registerTools() error {
 			mcp.Required(),
 			mcp.Description("Column number where the function is located (1-indexed)"),
 		),
+		mcp.WithNumber("depth",
+			mcp.Description("Maximum depth to traverse (default: 1, max: 10)"),
+		),
 	)
 
 	s.mcpServer.AddTool(callersTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -698,8 +701,19 @@ func (s *mcpServer) registerTools() error {
 			return mcp.NewToolResultError("column must be a number"), nil
 		}
 
-		coreLogger.Debug("Executing callers for %s:%d:%d", filePath, line, column)
-		text, err := tools.GetCallers(s.ctx, s.lspClient, filePath, line, column)
+		depth := 1
+		if v, ok := request.Params.Arguments["depth"].(float64); ok {
+			depth = int(v)
+			if depth > 10 {
+				depth = 10
+			}
+			if depth < 1 {
+				depth = 1
+			}
+		}
+
+		coreLogger.Debug("Executing callers for %s:%d:%d depth=%d", filePath, line, column, depth)
+		text, err := tools.GetCallers(s.ctx, s.lspClient, filePath, line, column, depth)
 		if err != nil {
 			coreLogger.Error("Failed to get callers: %v", err)
 			return mcp.NewToolResultError(fmt.Sprintf("failed to get callers: %v", err)), nil
@@ -720,6 +734,9 @@ func (s *mcpServer) registerTools() error {
 		mcp.WithNumber("column",
 			mcp.Required(),
 			mcp.Description("Column number where the function is located (1-indexed)"),
+		),
+		mcp.WithNumber("depth",
+			mcp.Description("Maximum depth to traverse (default: 1, max: 10)"),
 		),
 	)
 
@@ -748,8 +765,19 @@ func (s *mcpServer) registerTools() error {
 			return mcp.NewToolResultError("column must be a number"), nil
 		}
 
-		coreLogger.Debug("Executing callees for %s:%d:%d", filePath, line, column)
-		text, err := tools.GetCallees(s.ctx, s.lspClient, filePath, line, column)
+		depth := 1
+		if v, ok := request.Params.Arguments["depth"].(float64); ok {
+			depth = int(v)
+			if depth > 10 {
+				depth = 10
+			}
+			if depth < 1 {
+				depth = 1
+			}
+		}
+
+		coreLogger.Debug("Executing callees for %s:%d:%d depth=%d", filePath, line, column, depth)
+		text, err := tools.GetCallees(s.ctx, s.lspClient, filePath, line, column, depth)
 		if err != nil {
 			coreLogger.Error("Failed to get callees: %v", err)
 			return mcp.NewToolResultError(fmt.Sprintf("failed to get callees: %v", err)), nil
