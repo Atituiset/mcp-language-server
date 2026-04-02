@@ -15,40 +15,39 @@
 
 ---
 
-## 技术栈
+## 系统架构总览
 
-### Go 标准库
-
-| 包 | 用途 |
-|----|------|
-| `context` | 上下文管理、取消信号 |
-| `flag` | 命令行参数解析 |
-| `os/exec` | 启动和管理 LSP 服务器子进程 |
-| `os/signal` | SIGINT/SIGTERM 信号处理 |
-| `bufio` | 缓冲 I/O 读写 |
-| `encoding/json` | JSON-RPC 2.0 消息编解码 |
-| `path/filepath` | 文件路径处理 |
-| `sync/atomic` | 原子操作（请求 ID 计数器） |
-
-### 第三方依赖
-
-| 依赖 | 版本 | 用途 |
-|------|------|------|
-| `github.com/mark3labs/mcp-go` | v0.25.0 | **MCP 协议通信核心** |
-| `github.com/fsnotify/fsnotify` | v1.9.0 | 文件系统监视 |
-| `github.com/sabhiram/go-gitignore` | - | .gitignore 模式匹配 |
-| `github.com/davecgh/go-spew` | v1.1.1 | 调试输出 |
-| `github.com/stretchr/testify` | v1.10.0 | 测试框架（断言） |
-| `golang.org/x/text` | v0.25.0 | 文本处理（Unicode 等） |
-| `github.com/smacker/go-tree-sitter` | latest | **Tree-sitter AST 解析** |
-| `github.com/smacker/go-tree-sitter/c` | latest | **C 语言解析器** |
-| `github.com/smacker/go-tree-sitter/cpp` | latest | **C++ 语言解析器** |
-
-### LSP 协议来源
-
-- **协议类型**: 从 [vscode-languageserver-node](https://github.com/microsoft/vscode-languageserver-node) (release/protocol/3.17.6-next.9) 自动生成
-- **通信处理**: 参考 [gopls](https://github.com/golang/tools/tree/master/gopls) (Go 语言服务器) 的实现
-- **代码生成器**: 位于 `cmd/generate/`
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                         MCP Language Server                             │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│  ┌──────────────┐    ┌─────────────────┐    ┌──────────────────┐    │
+│  │   main.go    │───>│   mcpServer     │───>│    tools.go       │    │
+│  │   入口点     │    │   (编排器)       │    │  (工具注册)       │    │
+│  └──────────────┘    └────────┬────────┘    └──────┬───────────┘    │
+│                                │                     │                  │
+│                                v                     v                  │
+│                    ┌─────────────────┐    ┌──────────────────┐      │
+│                    │   LSP Client    │    │     Router       │      │
+│                    │ internal/lsp/   │    │   (搜索仲裁)     │      │
+│                    └────────┬────────┘    └──────┬───────────┘      │
+│                             │                     │                    │
+│                             v         ┌─────────┴─────────┐          │
+│                    ┌─────────────────┐ │   三层搜索架构    │          │
+│                    │   文件监视器     │ │                  │          │
+│                    │ internal/watcher│ │  L1: ripgrep    │          │
+│                    │   (fsnotify)    │ │  L2: tree-sitter│          │
+│                    └─────────────────┘ │  L3: LSP        │          │
+│                                         └─────────────────┘          │
+└─────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    v
+                        ┌─────────────────────────┐
+                        │    外部 LSP 服务器进程   │
+                        │  (gopls/clangd/etc.)   │
+                        └─────────────────────────┘
+```
 
 ---
 
@@ -69,57 +68,62 @@ mcp-language-server/
 │
 ├── internal/
 │   ├── lsp/                   # LSP 客户端实现
-│   │   ├── client.go          # 核心：进程管理、消息分发
-│   │   ├── protocol.go        # 协议类型
-│   │   ├── methods.go         # LSP 请求封装 (Call/Notify)
-│   │   ├── transport.go       # Content-Length 消息协议
+│   │   ├── client.go         # 核心：进程管理、消息分发
+│   │   ├── protocol.go       # 协议类型
+│   │   ├── methods.go        # LSP 请求封装 (Call/Notify)
+│   │   ├── transport.go      # Content-Length 消息协议
 │   │   ├── server-request-handlers.go  # 服务端请求处理
 │   │   ├── detect-language.go          # 语言检测
-│   │   └── typescript.go      # TypeScript 特殊初始化
+│   │   └── typescript.go     # TypeScript 特殊初始化
 │   │
 │   ├── protocol/              # LSP 协议类型（生成）
-│   │   ├── tsprotocol.go      # 主协议类型定义
-│   │   ├── tsjson.go          # JSON 序列化/反序列化
-│   │   ├── interfaces.go      # 接口定义
-│   │   ├── uri.go             # URI 处理
-│   │   └── tables.go          # 查找表
+│   │   ├── tsprotocol.go     # 主协议类型定义
+│   │   ├── tsjson.go        # JSON 序列化/反序列化
+│   │   ├── interfaces.go     # 接口定义
+│   │   ├── uri.go           # URI 处理
+│   │   └── tables.go        # 查找表
 │   │
 │   ├── tools/                # MCP 工具实现
-│   │   ├── definition.go     # 符号定义查找 (L3)
-│   │   ├── references.go      # 引用查找 (L3)
-│   │   ├── diagnostics.go     # 诊断信息
-│   │   ├── hover.go           # 悬停信息
-│   │   ├── rename-symbol.go   # 重命名符号
-│   │   ├── edit_file.go       # 文本编辑
-│   │   ├── get-codelens.go    # CodeLens 获取
+│   │   ├── definition.go    # 符号定义查找 (L3)
+│   │   ├── references.go     # 引用查找 (L3)
+│   │   ├── diagnostics.go    # 诊断信息
+│   │   ├── hover.go         # 悬停信息
+│   │   ├── rename-symbol.go  # 重命名符号
+│   │   ├── edit_file.go     # 文本编辑
+│   │   ├── get-codelens.go   # CodeLens 获取
 │   │   ├── execute-codelens.go # CodeLens 执行
-│   │   ├── ripgrep.go        # 文本搜索 (L1)
-│   │   ├── treesitter.go      # Tree-sitter 包装 (L2)
-│   │   ├── call_hierarchy.go  # 调用层级查询 (L3)
+│   │   ├── ripgrep.go       # 文本搜索 (L1)
+│   │   ├── treesitter.go     # Tree-sitter 包装 (L2)
+│   │   ├── call_hierarchy.go # 调用层级查询 (L3)
 │   │   ├── find_struct_usage.go # 结构体使用查询 (L2)
-│   │   ├── router/           # 搜索路由
-│   │   │   └── router.go     # 统一搜索路由器
-│   │   └── treesitter/       # Tree-sitter 核心
-│   │       ├── parser.go     # 解析器
-│   │       ├── query.go      # CSP 查询
-│   │       ├── ast.go        # AST 工具
-│   │       └── cursor.go     # TreeCursor 工具
+│   │   │
+│   │   ├── router/          # 搜索路由
+│   │   │   └── router.go   # 统一搜索路由器 + 缓存
+│   │   │
+│   │   ├── cache/          # 缓存层
+│   │   │   └── cache.go   # 线程安全内存缓存
+│   │   │
+│   │   └── treesitter/      # Tree-sitter 核心
+│   │       ├── parser.go    # 解析器 (C/C++)
+│   │       ├── query.go     # CSP 查询执行
+│   │       ├── ast.go       # AST 工具函数
+│   │       └── cursor.go    # TreeCursor 工具
 │   │
 │   ├── watcher/             # 文件系统监视器
-│   │   ├── watcher.go        # 核心逻辑 (fsnotify)
-│   │   ├── gitignore.go      # gitignore 匹配
-│   │   └── interfaces.go      # LSPClient 接口
+│   │   ├── watcher.go       # 核心逻辑 (fsnotify)
+│   │   ├── gitignore.go     # gitignore 匹配
+│   │   └── interfaces.go    # LSPClient 接口
 │   │
-│   ├── utilities/           # 通用工具
-│   │   └── edit.go          # WorkspaceEdit 应用
+│   ├── utilities/            # 通用工具
+│   │   └── edit.go         # WorkspaceEdit 应用
 │   │
-│   └── logging/            # 日志系统
-│       └── logger.go       # 组件化日志
+│   └── logging/              # 日志系统
+│       └── logger.go        # 组件化日志
 │
-└── integrationtests/       # 集成测试
-    ├── tests/              # 测试用例 (Go/Rust/Python/TypeScript/Clangd)
-    ├── workspaces/         # 模拟工作区
-    └── snapshots/         # 快照测试数据
+└── integrationtests/         # 集成测试
+    ├── tests/               # 测试用例 (Go/C/Rust/Python/TypeScript/Clangd)
+    ├── workspaces/          # 模拟工作区
+    └── snapshots/          # 快照测试数据
 ```
 
 ---
@@ -132,7 +136,7 @@ mcp-language-server/
 ┌─────────────────────────────────────────────────────────────┐
 │                    统一搜索入口 (search)                       │
 │              模型自主选择 或 自动智能路由                         │
-└─────────────────────┬───────────────────────────────────────┘
+└─────────────────────┬─────────────────────────────────────┘
                       │
           ┌───────────┼───────────┐
           │           │           │
@@ -213,6 +217,133 @@ Auto 路由规则:
 
 ---
 
+## 组件交互与数据流
+
+### 启动流程
+
+```
+main()
+  │
+  ├── parseConfig()           # 解析 --workspace, --lsp 参数
+  │
+  ├── newServer()            # 创建 mcpServer
+  │
+  └── server.start()
+        │
+        ├── initializeLSP()
+        │     │
+        │     ├── lsp.NewClient()          # 启动 LSP 服务器进程
+        │     ├── client.InitializeLSPClient()  # 发送 initialize 请求
+        │     ├── watcher.NewWorkspaceWatcher(client)
+        │     └── watcher.WatchWorkspace()  # 启动文件监视
+        │
+        ├── server.NewMCPServer()    # 创建 MCP 服务器
+        │
+        ├── registerTools()          # 注册所有 MCP 工具
+        │
+        └── server.ServeStdio()     # 阻塞 stdio 循环
+```
+
+### 工具执行流程 (以 ripgrep 为例)
+
+```
+MCP 客户端
+    │
+    v
+tools.go: s.mcpServer.AddTool(ripgrepTool, handler)
+    │
+    v
+handler 提取参数，调用 tools.SearchCode()
+    │
+    v
+tools/ripgrep.go: 执行 "rg" 命令
+    │
+    v
+返回格式化结果
+    │
+    v
+mcp.NewToolResultText(response)
+    │
+    v
+MCP 客户端接收结果
+```
+
+### 搜索流程 (统一 search 工具)
+
+```
+MCP 客户端
+    │
+    v
+tools.go: searchRouter.Search(ctx, opts)
+    │
+    v
+router.Search()
+    │
+    ├──> 检查缓存 (cache.SearchCacheKey)
+    │     │
+    │     └──> 缓存命中: 返回缓存结果
+    │
+    └──> 缓存未命中: switch(opts.Strategy)
+          │
+          ├──> "text"    -> searchText()  -> ripgrep
+          ├──> "ast"     -> searchAST()   -> tree-sitter
+          ├──> "symbol"  -> searchSymbol()-> ripgrep (后备)
+          └──> "auto"    -> routeByIntent() 或 searchAll()
+    │
+    v
+缓存结果（除非出错）
+    │
+    v
+返回 []SearchResult
+```
+
+### 文件监视流程
+
+```
+文件系统事件 (创建/写入/删除)
+    │
+    v
+fsnotify 检测到事件
+    │
+    v
+WorkspaceWatcher.event loop 接收事件
+    │
+    v
+shouldExcludeFile/shouldExcludeDir() 检查
+    │
+    v
+isPathWatched() - 匹配 LSP 注册
+    │
+    v
+debounceHandleFileEvent() - 合并快速事件
+    │
+    v
+handleFileEvent()
+    │
+    ├──> 如果文件已打开且变更 -> client.NotifyChange()
+    │
+    └──> 否则 -> client.DidChangeWatchedFiles() 通知
+```
+
+### 关闭流程
+
+```
+信号 (SIGINT/SIGTERM) 或 父进程死亡
+    │
+    v
+cleanup()
+    │
+    ├──> lspClient.CloseAllFiles()  # 发送 didClose
+    ├──> lspClient.Shutdown()      # 发送 shutdown (带超时)
+    ├──> lspClient.Exit()          # 发送 exit
+    ├──> lspClient.Close()         # 关闭进程和管道
+    │
+    v
+退出进程
+```
+
+---
+
 ## LSP 协议实现
 
 ### 消息协议
@@ -276,6 +407,38 @@ JSON-RPC 2.0 格式：
 
 ---
 
+## 缓存机制
+
+### 架构
+
+```
+Search(query)
+    │
+    ├──> cache.Get(cacheKey) ──────> 命中 → 返回缓存
+    │
+    └──> 未命中
+          │
+          ├──> 执行搜索
+          │
+          └──> cache.Set(cacheKey, results) → 返回
+```
+
+### 特性
+
+- **线程安全**: 使用 `sync.RWMutex`
+- **TTL 过期**: 默认 5 分钟，可配置
+- **缓存键**: 基于 query/strategy/filePath/language 生成
+
+### 缓存键生成
+
+```go
+func SearchCacheKey(query, strategy, filePath, language string) string {
+    return fmt.Sprintf("%s:%s:%s:%s:", query, strategy, filePath, language)
+}
+```
+
+---
+
 ## 文件监视器
 
 使用 `fsnotify` 监视文件变化：
@@ -286,21 +449,28 @@ JSON-RPC 2.0 格式：
 - **大小限制**: 最大 5MB 文件
 - **Gitignore 支持**: 自动排除匹配的文件
 
+### 排除规则
+
+1. `.gitignore` 中的模式
+2. 以 `.` 开头的目录/文件
+3. 配置中指定的排除目录
+4. 二进制文件
+5. 超过大小限制的文件
+
 ---
 
-## 启动流程
+## 典型用法：LLM 辅助安全检视
 
 ```
-1. parseConfig()       - 解析 --workspace, --lsp 参数
-2. newServer()         - 创建 MCP 服务器
-3. initializeLSP()     - 启动 LSP 子进程并初始化
-   3.1 创建 LSP 客户端 (lsp.NewClient)
-   3.2 发送 initialize 请求
-   3.3 注册处理器 (publishDiagnostics 等)
-   3.4 启动文件监视器 (WatchWorkspace)
-4. registerTools()      - 注册 MCP 工具
-5. ServeStdio()        - 进入 MCP 服务循环 (stdio)
-6. 优雅关闭            - 关闭文件、shutdown、exit
+用户: "检查 main.cpp 中的 getUserInput 函数是否有安全漏洞"
+
+工具链:
+1. definition("getUserInput")           → 获取函数定义和实现
+2. callers("main.cpp", line, col, depth=3)  → 提取上游调用链
+3. callees("main.cpp", line, col, depth=2)   → 提取下游函数调用
+4. find_struct_usage("UserData")       → 查找相关结构体使用
+
+组合上下文 → 发送给 LLM → LLM 输出安全分析报告
 ```
 
 ---
@@ -344,30 +514,15 @@ mcp-language-server --workspace /path/to/project --lsp gopls
 
 ---
 
-## 典型用法：LLM 辅助安全检视
-
-```
-用户: "检查 main.cpp 中的 getUserInput 函数是否有安全漏洞"
-
-工具链:
-1. definition("getUserInput")           → 获取函数定义和实现
-2. callers("main.cpp", line, col, depth=3)  → 提取上游调用链
-3. callees("main.cpp", line, col, depth=2)   → 提取下游函数调用
-4. find_struct_usage("UserData")       → 查找相关结构体使用
-
-组合上下文 → 发送给 LLM → LLM 输出安全分析报告
-```
-
----
-
 ## 架构设计亮点
 
 1. **上下文提取定位**: 本工具专注提取代码上下文（定义、引用、调用关系、AST 结构），由 LLM 负责安全分析
 2. **三层搜索架构**: ripgrep (L1) + tree-sitter (L2) + LSP (L3)，平衡速度与语义
 3. **智能路由**: 统一入口，自动选择最佳搜索层
-4. **进程分离**: LSP 服务器作为子进程，通过 stdio 通信
-5. **代码生成**: LSP 协议类型自动从 vscode-languageserver-node 生成
-6. **优雅关闭**: 多层关闭机制（信号、父进程监控、超时）
-7. **内存缓存**: 诊断结果和打开文件状态缓存
-8. **Debounce**: 文件变化通知防抖
-9. **Gitignore 支持**: 自动排除不需要监视的文件
+4. **结果缓存**: 搜索结果缓存，减少重复查询
+5. **进程分离**: LSP 服务器作为子进程，通过 stdio 通信
+6. **代码生成**: LSP 协议类型自动从 vscode-languageserver-node 生成
+7. **优雅关闭**: 多层关闭机制（信号、父进程监控、超时）
+8. **内存缓存**: 诊断结果和打开文件状态缓存
+9. **Debounce**: 文件变化通知防抖
+10. **Gitignore 支持**: 自动排除不需要监视的文件
