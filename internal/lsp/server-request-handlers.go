@@ -119,10 +119,11 @@ func HandleDiagnostics(client *Client, params json.RawMessage) {
 		return
 	}
 
-	// Save diagnostics in client
 	client.diagnosticsMu.Lock()
 	client.diagnostics[diagParams.URI] = diagParams.Diagnostics
 	client.diagnosticsMu.Unlock()
+
+	client.notifyDiagnosticsArrived(diagParams.URI)
 
 	lspLogger.Info("Received diagnostics for %s: %d items", diagParams.URI, len(diagParams.Diagnostics))
 }

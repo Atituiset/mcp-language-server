@@ -519,7 +519,7 @@ func (s *mcpServer) registerTools() error {
 	})
 
 	// Unified search router
-	searchRouter := router.NewRouter(s.config.workspaceDir)
+	searchRouter := s.searchRouter
 
 	searchTool := mcp.NewTool("search",
 		mcp.WithDescription("Unified search across all layers. Use this as the primary search tool. Specify strategy='auto' for intelligent routing or use 'text'/'ast'/'symbol' to explicitly choose a layer."),

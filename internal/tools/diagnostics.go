@@ -98,21 +98,20 @@ func GetDiagnosticsDataForFile(ctx context.Context, client *lsp.Client, filePath
 		return data, fmt.Errorf("could not open file: %v", err)
 	}
 
-	// Wait for diagnostics
-	// TODO: wait for notification
-	time.Sleep(time.Second * 3)
-
-	// Convert the file path to URI format
 	uri := protocol.URIFromPath(filePath)
 
-	// Request fresh diagnostics
-	diagParams := protocol.DocumentDiagnosticParams{
+	received := client.WaitForDiagnostics(uri, 5*time.Second)
+	if !received {
+		toolsLogger.Warn("Diagnostics wait timed out for %s, falling back to cache", filePath)
+	}
+
+	_, err = client.Diagnostic(ctx, protocol.DocumentDiagnosticParams{
 		TextDocument: protocol.TextDocumentIdentifier{URI: uri},
-	}
-	_, err = client.Diagnostic(ctx, diagParams)
+	})
 	if err != nil {
-		toolsLogger.Error("Failed to get diagnostics: %v", err)
+		return data, fmt.Errorf("failed to request diagnostics: %v", err)
 	}
+	client.WaitForDiagnostics(uri, 3*time.Second)
 
 	// Get diagnostics from the cache
 	diagnostics := client.GetFileDiagnostics(uri)

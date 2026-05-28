@@ -17,8 +17,8 @@ import (
 )
 
 type Client struct {
-	Cmd    *exec.Cmd
-	stdin  io.WriteCloser
+	Cmd *exec.Cmd
+	stdin io.WriteCloser
 	stdout *bufio.Reader
 	stderr io.ReadCloser
 
@@ -26,23 +26,32 @@ type Client struct {
 	nextID atomic.Int32
 
 	// Response handlers
-	handlers   map[string]chan *Message
+	handlers map[string]chan *Message
 	handlersMu sync.RWMutex
 
 	// Server request handlers
 	serverRequestHandlers map[string]ServerRequestHandler
-	serverHandlersMu      sync.RWMutex
+	serverHandlersMu sync.RWMutex
 
 	// Notification handlers
 	notificationHandlers map[string]NotificationHandler
-	notificationMu       sync.RWMutex
+	notificationMu sync.RWMutex
 
 	// Diagnostic cache
-	diagnostics   map[protocol.DocumentUri][]protocol.Diagnostic
+	diagnostics map[protocol.DocumentUri][]protocol.Diagnostic
 	diagnosticsMu sync.RWMutex
 
+	// Diagnostic waiters: callers of WaitForDiagnostics block until
+	// publishDiagnostics arrives for the requested URI or timeout expires.
+	diagWaiters map[protocol.DocumentUri][]chan struct{}
+	diagWaitersMu sync.Mutex
+
+	// Text document sync kind reported by the server during initialization.
+	// 0=None, 1=Full, 2=Incremental
+	syncKind protocol.TextDocumentSyncKind
+
 	// Files are currently opened by the LSP
-	openFiles   map[string]*OpenFileInfo
+	openFiles map[string]*OpenFileInfo
 	openFilesMu sync.RWMutex
 }
 
@@ -67,15 +76,16 @@ func NewClient(command string, args ...string) (*Client, error) {
 	}
 
 	client := &Client{
-		Cmd:                   cmd,
-		stdin:                 stdin,
-		stdout:                bufio.NewReader(stdout),
-		stderr:                stderr,
-		handlers:              make(map[string]chan *Message),
-		notificationHandlers:  make(map[string]NotificationHandler),
+		Cmd: cmd,
+		stdin: stdin,
+		stdout: bufio.NewReader(stdout),
+		stderr: stderr,
+		handlers: make(map[string]chan *Message),
+		notificationHandlers: make(map[string]NotificationHandler),
 		serverRequestHandlers: make(map[string]ServerRequestHandler),
-		diagnostics:           make(map[protocol.DocumentUri][]protocol.Diagnostic),
-		openFiles:             make(map[string]*OpenFileInfo),
+		diagnostics: make(map[protocol.DocumentUri][]protocol.Diagnostic),
+		diagWaiters: make(map[protocol.DocumentUri][]chan struct{}),
+		openFiles: make(map[string]*OpenFileInfo),
 	}
 
 	// Start the LSP server process
@@ -196,6 +206,8 @@ func (c *Client) InitializeLSPClient(ctx context.Context, workspaceDir string) (
 		return nil, fmt.Errorf("initialize failed: %w", err)
 	}
 
+	c.syncKind = extractSyncKind(result.Capabilities.TextDocumentSync)
+
 	if err := c.Notify(ctx, "initialized", struct{}{}); err != nil {
 		return nil, fmt.Errorf("initialized notification failed: %w", err)
 	}
@@ -276,9 +288,27 @@ const (
 )
 
 func (c *Client) WaitForServerReady(ctx context.Context) error {
-	// TODO: wait for specific messages or poll workspace/symbol
-	time.Sleep(time.Second * 1)
-	return nil
+	for i := 0; i < 30; i++ {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
+		_, err := c.Symbol(ctx, protocol.WorkspaceSymbolParams{Query: ""})
+		if err == nil {
+			lspLogger.Info("LSP server ready (workspace/symbol responded)")
+			return nil
+		}
+
+		lspLogger.Debug("LSP server not ready yet, retrying in 500ms... (%d/30)", i+1)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(500 * time.Millisecond):
+		}
+	}
+	return fmt.Errorf("LSP server not ready after 15s")
 }
 
 type OpenFileInfo struct {
@@ -342,10 +372,23 @@ func (c *Client) NotifyChange(ctx context.Context, filepath string) error {
 		return fmt.Errorf("cannot notify change for unopened file: %s", filepath)
 	}
 
-	// Increment version
 	fileInfo.Version++
 	version := fileInfo.Version
 	c.openFilesMu.Unlock()
+
+	var changes []protocol.TextDocumentContentChangeEvent
+
+	if c.syncKind == protocol.Incremental {
+		changes = computeIncrementalChanges(fileInfo, content)
+	} else {
+		changes = []protocol.TextDocumentContentChangeEvent{
+			{
+				Value: protocol.TextDocumentContentChangeWholeDocument{
+					Text: string(content),
+				},
+			},
+		}
+	}
 
 	params := protocol.DidChangeTextDocumentParams{
 		TextDocument: protocol.VersionedTextDocumentIdentifier{
@@ -354,16 +397,20 @@ func (c *Client) NotifyChange(ctx context.Context, filepath string) error {
 			},
 			Version: version,
 		},
-		ContentChanges: []protocol.TextDocumentContentChangeEvent{
-			{
-				Value: protocol.TextDocumentContentChangeWholeDocument{
-					Text: string(content),
-				},
-			},
-		},
+		ContentChanges: changes,
 	}
 
 	return c.Notify(ctx, "textDocument/didChange", params)
+}
+
+func computeIncrementalChanges(fileInfo *OpenFileInfo, newContent []byte) []protocol.TextDocumentContentChangeEvent {
+	return []protocol.TextDocumentContentChangeEvent{
+		{
+			Value: protocol.TextDocumentContentChangeWholeDocument{
+				Text: string(newContent),
+			},
+		},
+	}
 }
 
 func (c *Client) CloseFile(ctx context.Context, filepath string) error {
@@ -433,4 +480,64 @@ func (c *Client) GetFileDiagnostics(uri protocol.DocumentUri) []protocol.Diagnos
 	defer c.diagnosticsMu.RUnlock()
 
 	return c.diagnostics[uri]
+}
+
+// WaitForDiagnostics blocks until publishDiagnostics arrives for the given URI
+// or the timeout expires. Returns true if diagnostics were received before timeout.
+func (c *Client) WaitForDiagnostics(uri protocol.DocumentUri, timeout time.Duration) bool {
+	ch := make(chan struct{}, 1)
+
+	c.diagWaitersMu.Lock()
+	c.diagWaiters[uri] = append(c.diagWaiters[uri], ch)
+	c.diagWaitersMu.Unlock()
+
+	select {
+	case <-ch:
+		return true
+	case <-time.After(timeout):
+		c.diagWaitersMu.Lock()
+		waiters := c.diagWaiters[uri]
+		for i, w := range waiters {
+			if w == ch {
+				c.diagWaiters[uri] = append(waiters[:i], waiters[i+1:]...)
+				break
+			}
+		}
+		c.diagWaitersMu.Unlock()
+		return false
+	}
+}
+
+// notifyDiagnosticsArrived wakes all goroutines waiting for diagnostics for the given URI.
+func (c *Client) notifyDiagnosticsArrived(uri protocol.DocumentUri) {
+	c.diagWaitersMu.Lock()
+	waiters := c.diagWaiters[uri]
+	delete(c.diagWaiters, uri)
+	c.diagWaitersMu.Unlock()
+
+	for _, ch := range waiters {
+		select {
+		case ch <- struct{}{}:
+		default:
+		}
+	}
+}
+
+func extractSyncKind(sync interface{}) protocol.TextDocumentSyncKind {
+	if sync == nil {
+		return protocol.Full
+	}
+	switch v := sync.(type) {
+	case float64:
+		return protocol.TextDocumentSyncKind(uint32(v))
+	case protocol.TextDocumentSyncKind:
+		return v
+	case map[string]interface{}:
+		if change, ok := v["change"]; ok {
+			if n, ok := change.(float64); ok {
+				return protocol.TextDocumentSyncKind(uint32(n))
+			}
+		}
+	}
+	return protocol.Full
 }

@@ -20,19 +20,19 @@ var watcherLogger = logging.NewLogger(logging.Watcher)
 
 // WorkspaceWatcher manages LSP file watching
 type WorkspaceWatcher struct {
-	client        LSPClient
+	client LSPClient
 	workspacePath string
 
-	config      *WatcherConfig
+	config *WatcherConfig
 	debounceMap map[string]*time.Timer
-	debounceMu  sync.Mutex
+	debounceMu sync.Mutex
 
-	// File watchers registered by the server
-	registrations  []protocol.FileSystemWatcher
+	registrations []protocol.FileSystemWatcher
 	registrationMu sync.RWMutex
 
-	// Gitignore matcher
 	gitignore *GitignoreMatcher
+
+	OnFileChange func()
 }
 
 // NewWorkspaceWatcher creates a new workspace watcher with default configuration
@@ -531,8 +531,11 @@ func (w *WorkspaceWatcher) debounceHandleFileEvent(ctx context.Context, uri stri
 
 // handleFileEvent sends file change notifications
 func (w *WorkspaceWatcher) handleFileEvent(ctx context.Context, uri string, changeType protocol.FileChangeType) {
-	// If the file is open and it's a change event, use didChange notification
-	filePath := uri[7:] // Remove "file://" prefix
+	if w.OnFileChange != nil {
+		w.OnFileChange()
+	}
+
+	filePath := uri[7:]
 	if changeType == protocol.FileChangeType(protocol.Changed) && w.client.IsFileOpen(filePath) {
 		err := w.client.NotifyChange(ctx, filePath)
 		if err != nil {
@@ -541,7 +544,6 @@ func (w *WorkspaceWatcher) handleFileEvent(ctx context.Context, uri string, chan
 		return
 	}
 
-	// Notify LSP server about the file event using didChangeWatchedFiles
 	if err := w.notifyFileEvent(ctx, uri, changeType); err != nil {
 		watcherLogger.Error("Error notifying LSP server about file event: %v", err)
 	}

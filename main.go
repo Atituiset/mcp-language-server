@@ -13,6 +13,7 @@ import (
 
 	"github.com/isaacphi/mcp-language-server/internal/logging"
 	"github.com/isaacphi/mcp-language-server/internal/lsp"
+	"github.com/isaacphi/mcp-language-server/internal/tools/router"
 	"github.com/isaacphi/mcp-language-server/internal/watcher"
 	"github.com/mark3labs/mcp-go/server"
 )
@@ -33,6 +34,7 @@ type mcpServer struct {
 	ctx              context.Context
 	cancelFunc       context.CancelFunc
 	workspaceWatcher *watcher.WorkspaceWatcher
+	searchRouter     *router.Router
 }
 
 func parseConfig() (*config, error) {
@@ -106,6 +108,11 @@ func (s *mcpServer) initializeLSP() error {
 func (s *mcpServer) start() error {
 	if err := s.initializeLSP(); err != nil {
 		return err
+	}
+
+	s.searchRouter = router.NewRouterWithClient(s.config.workspaceDir, s.lspClient)
+	s.workspaceWatcher.OnFileChange = func() {
+		s.searchRouter.ClearCache()
 	}
 
 	s.mcpServer = server.NewMCPServer(
