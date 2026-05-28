@@ -11,11 +11,22 @@ import (
 
 // CallResult 调用结果结构体，包含函数名、文件路径、行号列号和深度
 type CallResult struct {
-	Name     string // 函数名称
-	FilePath string // 文件路径
-	Line     int    // 行号
-	Column   int    // 列号
-	Depth    int    // 调用的深度层级
+	Name     string `json:"name"`     // 函数名称
+	FilePath string `json:"filePath"` // 文件路径
+	Line     int    `json:"line"`     // 行号
+	Column   int    `json:"column"`   // 列号
+	Depth    int    `json:"depth"`    // 调用的深度层级
+}
+
+type CallHierarchyData struct {
+	Direction string       `json:"direction"`
+	FilePath  string       `json:"filePath"`
+	Line      int          `json:"line"`
+	Column    int          `json:"column"`
+	MaxDepth  int          `json:"maxDepth"`
+	Prepared  bool         `json:"prepared"`
+	Total     int          `json:"total"`
+	Results   []CallResult `json:"results"`
 }
 
 // GetCallers 查找调用指定位置函数的函数（调用者）
@@ -30,31 +41,50 @@ type CallResult struct {
 //
 // 返回: 格式化的调用者列表，按深度分组
 func GetCallers(ctx context.Context, client *lsp.Client, filePath string, line, column, depth int) (string, error) {
+	data, err := GetCallersData(ctx, client, filePath, line, column, depth)
+	if err != nil {
+		return "", err
+	}
+	if len(data.Results) == 0 {
+		return FormatCallHierarchyData(data), nil
+	}
+	return FormatCallHierarchyData(data), nil
+}
+
+func GetCallersData(ctx context.Context, client *lsp.Client, filePath string, line, column, depth int) (CallHierarchyData, error) {
 	if depth <= 0 {
 		depth = 1
+	}
+	data := CallHierarchyData{
+		Direction: "incoming",
+		FilePath:  filePath,
+		Line:      line,
+		Column:    column,
+		MaxDepth:  depth,
 	}
 
 	// 打开文件到 LSP 服务器
 	if err := client.OpenFile(ctx, filePath); err != nil {
-		return "", fmt.Errorf("failed to open file: %w", err)
+		return data, fmt.Errorf("failed to open file: %w", err)
 	}
 
 	// 在指定位置准备调用层级
 	params := protocol.CallHierarchyPrepareParams{
 		TextDocumentPositionParams: protocol.TextDocumentPositionParams{
-			TextDocument: protocol.TextDocumentIdentifier{URI: protocol.DocumentUri("file://" + filePath)},
+			TextDocument: protocol.TextDocumentIdentifier{URI: protocol.URIFromPath(filePath)},
 			Position:     protocol.Position{Line: uint32(line - 1), Character: uint32(column - 1)},
 		},
 	}
 
 	items, err := client.PrepareCallHierarchy(ctx, params)
 	if err != nil {
-		return "", fmt.Errorf("failed to prepare call hierarchy: %w", err)
+		return data, fmt.Errorf("failed to prepare call hierarchy: %w", err)
 	}
 
 	if len(items) == 0 {
-		return "No call hierarchy items found at this position", nil
+		return data, nil
 	}
+	data.Prepared = true
 
 	// 收集初始位置的调用层级项
 	var startItems []*protocol.CallHierarchyItem
@@ -74,11 +104,9 @@ func GetCallers(ctx context.Context, client *lsp.Client, filePath string, line, 
 	// 递归收集调用者
 	collectCallers(ctx, client, startItems, depth, 1, seen, &results)
 
-	if len(results) == 0 {
-		return "No callers found", nil
-	}
-
-	return formatCallResultsWithDepth(results, "Callers", depth), nil
+	data.Results = results
+	data.Total = len(results)
+	return data, nil
 }
 
 // collectCallers 递归收集调用者
@@ -140,31 +168,50 @@ func collectCallers(ctx context.Context, client *lsp.Client, items []*protocol.C
 //
 // 返回: 格式化的被调用者列表，按深度分组
 func GetCallees(ctx context.Context, client *lsp.Client, filePath string, line, column, depth int) (string, error) {
+	data, err := GetCalleesData(ctx, client, filePath, line, column, depth)
+	if err != nil {
+		return "", err
+	}
+	if len(data.Results) == 0 {
+		return FormatCallHierarchyData(data), nil
+	}
+	return FormatCallHierarchyData(data), nil
+}
+
+func GetCalleesData(ctx context.Context, client *lsp.Client, filePath string, line, column, depth int) (CallHierarchyData, error) {
 	if depth <= 0 {
 		depth = 1
+	}
+	data := CallHierarchyData{
+		Direction: "outgoing",
+		FilePath:  filePath,
+		Line:      line,
+		Column:    column,
+		MaxDepth:  depth,
 	}
 
 	// 打开文件到 LSP 服务器
 	if err := client.OpenFile(ctx, filePath); err != nil {
-		return "", fmt.Errorf("failed to open file: %w", err)
+		return data, fmt.Errorf("failed to open file: %w", err)
 	}
 
 	// 在指定位置准备调用层级
 	params := protocol.CallHierarchyPrepareParams{
 		TextDocumentPositionParams: protocol.TextDocumentPositionParams{
-			TextDocument: protocol.TextDocumentIdentifier{URI: protocol.DocumentUri("file://" + filePath)},
+			TextDocument: protocol.TextDocumentIdentifier{URI: protocol.URIFromPath(filePath)},
 			Position:     protocol.Position{Line: uint32(line - 1), Character: uint32(column - 1)},
 		},
 	}
 
 	items, err := client.PrepareCallHierarchy(ctx, params)
 	if err != nil {
-		return "", fmt.Errorf("failed to prepare call hierarchy: %w", err)
+		return data, fmt.Errorf("failed to prepare call hierarchy: %w", err)
 	}
 
 	if len(items) == 0 {
-		return "No call hierarchy items found at this position", nil
+		return data, nil
 	}
+	data.Prepared = true
 
 	// 收集初始位置的调用层级项
 	var startItems []*protocol.CallHierarchyItem
@@ -184,11 +231,9 @@ func GetCallees(ctx context.Context, client *lsp.Client, filePath string, line, 
 	// 递归收集被调用者
 	collectCallees(ctx, client, startItems, depth, 1, seen, &results)
 
-	if len(results) == 0 {
-		return "No callees found", nil
-	}
-
-	return formatCallResultsWithDepth(results, "Callees", depth), nil
+	data.Results = results
+	data.Total = len(results)
+	return data, nil
 }
 
 // collectCallees 递归收集被调用者
@@ -245,7 +290,11 @@ func itemKey(item *protocol.CallHierarchyItem) string {
 
 // trimFileURI 移除 URI 的 file:// 前缀
 func trimFileURI(uri string) string {
-	return strings.TrimPrefix(uri, "file://")
+	documentURI, err := protocol.ParseDocumentUri(uri)
+	if err != nil {
+		return strings.TrimPrefix(uri, "file://")
+	}
+	return documentURI.Path()
 }
 
 // formatCallResultsWithDepth 格式化调用结果，按深度分组输出
@@ -278,4 +327,21 @@ func formatCallResultsWithDepth(results []CallResult, title string, maxDepth int
 	}
 
 	return b.String()
+}
+
+func FormatCallHierarchyData(data CallHierarchyData) string {
+	if len(data.Results) == 0 {
+		if !data.Prepared {
+			return "No call hierarchy items found at this position"
+		}
+		if data.Direction == "incoming" {
+			return "No callers found"
+		}
+		return "No callees found"
+	}
+	title := "Callees"
+	if data.Direction == "incoming" {
+		title = "Callers"
+	}
+	return formatCallResultsWithDepth(data.Results, title, data.MaxDepth)
 }

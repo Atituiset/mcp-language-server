@@ -79,7 +79,7 @@ func ReadDefinition(ctx context.Context, client *lsp.Client, symbolName string) 
 				container+
 				"Range: L%d:C%d - L%d:C%d\n\n",
 			symbol.GetName(),
-			strings.TrimPrefix(string(loc.URI), "file://"),
+			loc.URI.Path(),
 			loc.Range.Start.Line+1,
 			loc.Range.Start.Character+1,
 			loc.Range.End.Line+1,

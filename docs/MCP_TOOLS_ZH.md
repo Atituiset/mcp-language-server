@@ -242,14 +242,20 @@ No references found for symbol: helperFunction
 **参数**：
 | 参数 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| `filePath` | string | 是 | 包含函数的文件路径 |
-| `line` | number | 是 | 行号（1-based） |
-| `column` | number | 是 | 列号（1-based） |
+| `symbolName` | string | 否 | 函数/方法名；未提供精确位置时用于自动解析 |
+| `filePath` | string | 否 | 包含函数的文件路径；使用精确位置调用时必填，也可用于缩小 `symbolName` 解析范围 |
+| `line` | number | 否 | 行号（1-based）；使用精确位置调用时必填 |
+| `column` | number | 否 | 列号（1-based）；使用精确位置调用时必填 |
 | `depth` | number | 否 | 最大遍历深度（默认 1，最大 10） |
 
 **请求示例**：
 ```bash
 REQ='{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"callers","arguments":{"filePath":"src/main.cpp","line":11,"column":1}}}'
+```
+
+**Chat 模式示例**：
+```bash
+REQ='{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"callers","arguments":{"symbolName":"helperFunction","depth":2}}}'
 ```
 
 **测试结果**：
@@ -266,14 +272,20 @@ No call hierarchy items found at this position
 **参数**：
 | 参数 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| `filePath` | string | 是 | 包含函数的文件路径 |
-| `line` | number | 是 | 行号（1-based） |
-| `column` | number | 是 | 列号（1-based） |
+| `symbolName` | string | 否 | 函数/方法名；未提供精确位置时用于自动解析 |
+| `filePath` | string | 否 | 包含函数的文件路径；使用精确位置调用时必填，也可用于缩小 `symbolName` 解析范围 |
+| `line` | number | 否 | 行号（1-based）；使用精确位置调用时必填 |
+| `column` | number | 否 | 列号（1-based）；使用精确位置调用时必填 |
 | `depth` | number | 否 | 最大遍历深度（默认 1，最大 10） |
 
 **请求示例**：
 ```bash
 REQ='{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"callees","arguments":{"filePath":"src/main.cpp","line":11,"column":1}}}'
+```
+
+**Chat 模式示例**：
+```bash
+REQ='{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"callees","arguments":{"symbolName":"helperFunction","depth":2}}}'
 ```
 
 **测试结果**：

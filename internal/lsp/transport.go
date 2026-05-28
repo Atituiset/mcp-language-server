@@ -224,7 +224,12 @@ func (c *Client) Call(ctx context.Context, method string, params any, result any
 	lspLogger.Debug("Waiting for response to request ID: %v", msg.ID)
 
 	// Wait for response
-	resp := <-ch
+	var resp *Message
+	select {
+	case resp = <-ch:
+	case <-ctx.Done():
+		return fmt.Errorf("request %s failed: %w", method, ctx.Err())
+	}
 
 	lspLogger.Debug("Received response for request ID: %v", msg.ID)
 

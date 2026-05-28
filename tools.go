@@ -44,14 +44,15 @@ func (s *mcpServer) registerTools() error {
 	)
 
 	s.mcpServer.AddTool(applyTextEditTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		args := request.GetArguments()
 		// Extract arguments
-		filePath, ok := request.Params.Arguments["filePath"].(string)
+		filePath, ok := args["filePath"].(string)
 		if !ok {
 			return mcp.NewToolResultError("filePath must be a string"), nil
 		}
 
 		// Extract edits array
-		editsArg, ok := request.Params.Arguments["edits"]
+		editsArg, ok := args["edits"]
 		if !ok {
 			return mcp.NewToolResultError("edits is required"), nil
 		}
@@ -106,8 +107,9 @@ func (s *mcpServer) registerTools() error {
 	)
 
 	s.mcpServer.AddTool(readDefinitionTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		args := request.GetArguments()
 		// Extract arguments
-		symbolName, ok := request.Params.Arguments["symbolName"].(string)
+		symbolName, ok := args["symbolName"].(string)
 		if !ok {
 			return mcp.NewToolResultError("symbolName must be a string"), nil
 		}
@@ -130,8 +132,9 @@ func (s *mcpServer) registerTools() error {
 	)
 
 	s.mcpServer.AddTool(findReferencesTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		args := request.GetArguments()
 		// Extract arguments
-		symbolName, ok := request.Params.Arguments["symbolName"].(string)
+		symbolName, ok := args["symbolName"].(string)
 		if !ok {
 			return mcp.NewToolResultError("symbolName must be a string"), nil
 		}
@@ -151,40 +154,45 @@ func (s *mcpServer) registerTools() error {
 			mcp.Required(),
 			mcp.Description("The path to the file to get diagnostics for"),
 		),
-		mcp.WithBoolean("contextLines",
-			mcp.Description("Lines to include around each diagnostic."),
-			mcp.DefaultBool(false),
+		mcp.WithNumber("contextLines",
+			mcp.Description("Number of context lines to include around each diagnostic."),
 		),
 		mcp.WithBoolean("showLineNumbers",
 			mcp.Description("If true, adds line numbers to the output"),
 			mcp.DefaultBool(true),
 		),
 	)
+	getDiagnosticsTool.Meta = appToolMeta("ui://diagnostics/dashboard")
 
 	s.mcpServer.AddTool(getDiagnosticsTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		args := request.GetArguments()
 		// Extract arguments
-		filePath, ok := request.Params.Arguments["filePath"].(string)
+		filePath, ok := args["filePath"].(string)
 		if !ok {
 			return mcp.NewToolResultError("filePath must be a string"), nil
 		}
 
 		contextLines := 5 // default value
-		if contextLinesArg, ok := request.Params.Arguments["contextLines"].(int); ok {
-			contextLines = contextLinesArg
+		switch v := args["contextLines"].(type) {
+		case float64:
+			contextLines = int(v)
+		case int:
+			contextLines = v
 		}
 
 		showLineNumbers := true // default value
-		if showLineNumbersArg, ok := request.Params.Arguments["showLineNumbers"].(bool); ok {
+		if showLineNumbersArg, ok := args["showLineNumbers"].(bool); ok {
 			showLineNumbers = showLineNumbersArg
 		}
 
 		coreLogger.Debug("Executing diagnostics for file: %s", filePath)
-		text, err := tools.GetDiagnosticsForFile(s.ctx, s.lspClient, filePath, contextLines, showLineNumbers)
+		data, err := tools.GetDiagnosticsDataForFile(s.ctx, s.lspClient, filePath, contextLines, showLineNumbers)
 		if err != nil {
 			coreLogger.Error("Failed to get diagnostics: %v", err)
 			return mcp.NewToolResultError(fmt.Sprintf("failed to get diagnostics: %v", err)), nil
 		}
-		return mcp.NewToolResultText(text), nil
+		text := tools.FormatDiagnosticsData(data, showLineNumbers)
+		return newAppToolResult(data, text, "ui://diagnostics/dashboard"), nil
 	})
 
 	// Uncomment to add codelens tools
@@ -269,15 +277,16 @@ func (s *mcpServer) registerTools() error {
 	)
 
 	s.mcpServer.AddTool(hoverTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		args := request.GetArguments()
 		// Extract arguments
-		filePath, ok := request.Params.Arguments["filePath"].(string)
+		filePath, ok := args["filePath"].(string)
 		if !ok {
 			return mcp.NewToolResultError("filePath must be a string"), nil
 		}
 
 		// Handle both float64 and int for line and column due to JSON parsing
 		var line, column int
-		switch v := request.Params.Arguments["line"].(type) {
+		switch v := args["line"].(type) {
 		case float64:
 			line = int(v)
 		case int:
@@ -286,7 +295,7 @@ func (s *mcpServer) registerTools() error {
 			return mcp.NewToolResultError("line must be a number"), nil
 		}
 
-		switch v := request.Params.Arguments["column"].(type) {
+		switch v := args["column"].(type) {
 		case float64:
 			column = int(v)
 		case int:
@@ -325,20 +334,21 @@ func (s *mcpServer) registerTools() error {
 	)
 
 	s.mcpServer.AddTool(renameSymbolTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		args := request.GetArguments()
 		// Extract arguments
-		filePath, ok := request.Params.Arguments["filePath"].(string)
+		filePath, ok := args["filePath"].(string)
 		if !ok {
 			return mcp.NewToolResultError("filePath must be a string"), nil
 		}
 
-		newName, ok := request.Params.Arguments["newName"].(string)
+		newName, ok := args["newName"].(string)
 		if !ok {
 			return mcp.NewToolResultError("newName must be a string"), nil
 		}
 
 		// Handle both float64 and int for line and column due to JSON parsing
 		var line, column int
-		switch v := request.Params.Arguments["line"].(type) {
+		switch v := args["line"].(type) {
 		case float64:
 			line = int(v)
 		case int:
@@ -347,7 +357,7 @@ func (s *mcpServer) registerTools() error {
 			return mcp.NewToolResultError("line must be a number"), nil
 		}
 
-		switch v := request.Params.Arguments["column"].(type) {
+		switch v := args["column"].(type) {
 		case float64:
 			column = int(v)
 		case int:
@@ -392,7 +402,8 @@ func (s *mcpServer) registerTools() error {
 	)
 
 	s.mcpServer.AddTool(ripgrepTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		pattern, ok := request.Params.Arguments["pattern"].(string)
+		args := request.GetArguments()
+		pattern, ok := args["pattern"].(string)
 		if !ok {
 			return mcp.NewToolResultError("pattern must be a string"), nil
 		}
@@ -401,22 +412,22 @@ func (s *mcpServer) registerTools() error {
 			MaxCount: 100,
 		}
 
-		if v, ok := request.Params.Arguments["caseSensitive"].(bool); ok {
+		if v, ok := args["caseSensitive"].(bool); ok {
 			opts.CaseSensitive = v
 		}
-		if v, ok := request.Params.Arguments["wholeWord"].(bool); ok {
+		if v, ok := args["wholeWord"].(bool); ok {
 			opts.WholeWord = v
 		}
-		if v, ok := request.Params.Arguments["maxCount"].(float64); ok {
+		if v, ok := args["maxCount"].(float64); ok {
 			opts.MaxCount = int(v)
 		}
-		if v, ok := request.Params.Arguments["contextLines"].(float64); ok {
+		if v, ok := args["contextLines"].(float64); ok {
 			opts.ContextLines = int(v)
 		}
-		if v, ok := request.Params.Arguments["fileType"].(string); ok {
+		if v, ok := args["fileType"].(string); ok {
 			opts.FileType = v
 		}
-		if v, ok := request.Params.Arguments["include"].(string); ok {
+		if v, ok := args["include"].(string); ok {
 			opts.Include = v
 		}
 
@@ -444,16 +455,17 @@ func (s *mcpServer) registerTools() error {
 	)
 
 	s.mcpServer.AddTool(treesitterQueryTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		query, ok := request.Params.Arguments["query"].(string)
+		args := request.GetArguments()
+		query, ok := args["query"].(string)
 		if !ok {
 			return mcp.NewToolResultError("query must be a string"), nil
 		}
 
 		var filePath, language string
-		if v, ok := request.Params.Arguments["filePath"].(string); ok {
+		if v, ok := args["filePath"].(string); ok {
 			filePath = v
 		}
-		if v, ok := request.Params.Arguments["language"].(string); ok {
+		if v, ok := args["language"].(string); ok {
 			language = v
 		}
 
@@ -481,18 +493,19 @@ func (s *mcpServer) registerTools() error {
 	)
 
 	s.mcpServer.AddTool(treesitterASTTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		filePath, ok := request.Params.Arguments["filePath"].(string)
+		args := request.GetArguments()
+		filePath, ok := args["filePath"].(string)
 		if !ok {
 			return mcp.NewToolResultError("filePath must be a string"), nil
 		}
 
 		var nodeType string
-		if v, ok := request.Params.Arguments["nodeType"].(string); ok {
+		if v, ok := args["nodeType"].(string); ok {
 			nodeType = v
 		}
 
 		maxDepth := 10
-		if v, ok := request.Params.Arguments["maxDepth"].(float64); ok {
+		if v, ok := args["maxDepth"].(float64); ok {
 			maxDepth = int(v)
 		}
 
@@ -530,7 +543,8 @@ func (s *mcpServer) registerTools() error {
 	)
 
 	s.mcpServer.AddTool(searchTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		query, ok := request.Params.Arguments["query"].(string)
+		args := request.GetArguments()
+		query, ok := args["query"].(string)
 		if !ok {
 			return mcp.NewToolResultError("query must be a string"), nil
 		}
@@ -539,16 +553,16 @@ func (s *mcpServer) registerTools() error {
 			Query: query,
 		}
 
-		if v, ok := request.Params.Arguments["strategy"].(string); ok {
+		if v, ok := args["strategy"].(string); ok {
 			opts.Strategy = v
 		}
-		if v, ok := request.Params.Arguments["intent"].(string); ok {
+		if v, ok := args["intent"].(string); ok {
 			opts.Intent = v
 		}
-		if v, ok := request.Params.Arguments["filePath"].(string); ok {
+		if v, ok := args["filePath"].(string); ok {
 			opts.FilePath = v
 		}
-		if v, ok := request.Params.Arguments["language"].(string); ok {
+		if v, ok := args["language"].(string); ok {
 			opts.Language = v
 		}
 
@@ -575,13 +589,14 @@ func (s *mcpServer) registerTools() error {
 	)
 
 	s.mcpServer.AddTool(searchTextTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		query, ok := request.Params.Arguments["query"].(string)
+		args := request.GetArguments()
+		query, ok := args["query"].(string)
 		if !ok {
 			return mcp.NewToolResultError("query must be a string"), nil
 		}
 
 		opts := router.SearchOptions{Query: query, Strategy: "text"}
-		if v, ok := request.Params.Arguments["filePath"].(string); ok {
+		if v, ok := args["filePath"].(string); ok {
 			opts.FilePath = v
 		}
 
@@ -607,16 +622,17 @@ func (s *mcpServer) registerTools() error {
 	)
 
 	s.mcpServer.AddTool(searchASTTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		query, ok := request.Params.Arguments["query"].(string)
+		args := request.GetArguments()
+		query, ok := args["query"].(string)
 		if !ok {
 			return mcp.NewToolResultError("query must be a string"), nil
 		}
 
 		opts := router.SearchOptions{Query: query, Strategy: "ast"}
-		if v, ok := request.Params.Arguments["filePath"].(string); ok {
+		if v, ok := args["filePath"].(string); ok {
 			opts.FilePath = v
 		}
-		if v, ok := request.Params.Arguments["language"].(string); ok {
+		if v, ok := args["language"].(string); ok {
 			opts.Language = v
 		}
 
@@ -639,13 +655,14 @@ func (s *mcpServer) registerTools() error {
 	)
 
 	s.mcpServer.AddTool(searchSymbolTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		query, ok := request.Params.Arguments["query"].(string)
+		args := request.GetArguments()
+		query, ok := args["query"].(string)
 		if !ok {
 			return mcp.NewToolResultError("query must be a string"), nil
 		}
 
 		opts := router.SearchOptions{Query: query, Strategy: "symbol"}
-		if v, ok := request.Params.Arguments["filePath"].(string); ok {
+		if v, ok := args["filePath"].(string); ok {
 			opts.FilePath = v
 		}
 
@@ -658,52 +675,58 @@ func (s *mcpServer) registerTools() error {
 
 	// Call hierarchy tools
 	callersTool := mcp.NewTool("callers",
-		mcp.WithDescription("Find functions that call the function at the specified position (incoming call hierarchy)."),
+		mcp.WithDescription("Find functions that call a function (incoming call hierarchy). Prefer filePath+line+column for precise agent calls; use symbolName for chat-style calls."),
+		mcp.WithString("symbolName",
+			mcp.Description("Symbol name to resolve when filePath, line, and column are not provided"),
+		),
 		mcp.WithString("filePath",
-			mcp.Required(),
-			mcp.Description("Path to the file containing the function"),
+			mcp.Description("Path to the file containing the function. Required unless symbolName is provided"),
 		),
 		mcp.WithNumber("line",
-			mcp.Required(),
-			mcp.Description("Line number where the function is located (1-indexed)"),
+			mcp.Description("Line number where the function is located, 1-indexed. Required unless symbolName is provided"),
 		),
 		mcp.WithNumber("column",
-			mcp.Required(),
-			mcp.Description("Column number where the function is located (1-indexed)"),
+			mcp.Description("Column number where the function is located, 1-indexed. Required unless symbolName is provided"),
 		),
 		mcp.WithNumber("depth",
 			mcp.Description("Maximum depth to traverse (default: 1, max: 10)"),
 		),
 	)
+	callersTool.Meta = appToolMeta("ui://call-hierarchy/graph")
 
 	s.mcpServer.AddTool(callersTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		filePath, ok := request.Params.Arguments["filePath"].(string)
-		if !ok {
-			return mcp.NewToolResultError("filePath must be a string"), nil
+		args := request.GetArguments()
+		filePath, _ := args["filePath"].(string)
+		symbolName, _ := args["symbolName"].(string)
+
+		line, lineOK := readIntArgument(args, "line")
+		column, columnOK := readIntArgument(args, "column")
+
+		if (!lineOK || !columnOK || filePath == "") && symbolName != "" {
+			loc, err := tools.ResolveSymbolLocation(s.ctx, s.lspClient, symbolName, filePath)
+			if err != nil {
+				return mcp.NewToolResultError(err.Error()), nil
+			}
+			filePath = loc.URI.Path()
+			line = int(loc.Range.Start.Line + 1)
+			column = int(loc.Range.Start.Character + 1)
+			lineOK = true
+			columnOK = true
 		}
 
-		var line, column int
-		switch v := request.Params.Arguments["line"].(type) {
-		case float64:
-			line = int(v)
-		case int:
-			line = v
-		default:
+		if filePath == "" {
+			return mcp.NewToolResultError("filePath is required unless symbolName resolves to a location"), nil
+		}
+		if !lineOK {
 			return mcp.NewToolResultError("line must be a number"), nil
 		}
-
-		switch v := request.Params.Arguments["column"].(type) {
-		case float64:
-			column = int(v)
-		case int:
-			column = v
-		default:
+		if !columnOK {
 			return mcp.NewToolResultError("column must be a number"), nil
 		}
 
 		depth := 1
-		if v, ok := request.Params.Arguments["depth"].(float64); ok {
-			depth = int(v)
+		if v, ok := readIntArgument(args, "depth"); ok {
+			depth = v
 			if depth > 10 {
 				depth = 10
 			}
@@ -713,61 +736,68 @@ func (s *mcpServer) registerTools() error {
 		}
 
 		coreLogger.Debug("Executing callers for %s:%d:%d depth=%d", filePath, line, column, depth)
-		text, err := tools.GetCallers(s.ctx, s.lspClient, filePath, line, column, depth)
+		data, err := tools.GetCallersData(s.ctx, s.lspClient, filePath, line, column, depth)
 		if err != nil {
 			coreLogger.Error("Failed to get callers: %v", err)
 			return mcp.NewToolResultError(fmt.Sprintf("failed to get callers: %v", err)), nil
 		}
-		return mcp.NewToolResultText(text), nil
+		text := tools.FormatCallHierarchyData(data)
+		return newAppToolResult(data, text, "ui://call-hierarchy/graph"), nil
 	})
 
 	calleesTool := mcp.NewTool("callees",
-		mcp.WithDescription("Find functions that are called by the function at the specified position (outgoing call hierarchy)."),
+		mcp.WithDescription("Find functions called by a function (outgoing call hierarchy). Prefer filePath+line+column for precise agent calls; use symbolName for chat-style calls."),
+		mcp.WithString("symbolName",
+			mcp.Description("Symbol name to resolve when filePath, line, and column are not provided"),
+		),
 		mcp.WithString("filePath",
-			mcp.Required(),
-			mcp.Description("Path to the file containing the function"),
+			mcp.Description("Path to the file containing the function. Required unless symbolName is provided"),
 		),
 		mcp.WithNumber("line",
-			mcp.Required(),
-			mcp.Description("Line number where the function is located (1-indexed)"),
+			mcp.Description("Line number where the function is located, 1-indexed. Required unless symbolName is provided"),
 		),
 		mcp.WithNumber("column",
-			mcp.Required(),
-			mcp.Description("Column number where the function is located (1-indexed)"),
+			mcp.Description("Column number where the function is located, 1-indexed. Required unless symbolName is provided"),
 		),
 		mcp.WithNumber("depth",
 			mcp.Description("Maximum depth to traverse (default: 1, max: 10)"),
 		),
 	)
+	calleesTool.Meta = appToolMeta("ui://call-hierarchy/graph")
 
 	s.mcpServer.AddTool(calleesTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		filePath, ok := request.Params.Arguments["filePath"].(string)
-		if !ok {
-			return mcp.NewToolResultError("filePath must be a string"), nil
+		args := request.GetArguments()
+		filePath, _ := args["filePath"].(string)
+		symbolName, _ := args["symbolName"].(string)
+
+		line, lineOK := readIntArgument(args, "line")
+		column, columnOK := readIntArgument(args, "column")
+
+		if (!lineOK || !columnOK || filePath == "") && symbolName != "" {
+			loc, err := tools.ResolveSymbolLocation(s.ctx, s.lspClient, symbolName, filePath)
+			if err != nil {
+				return mcp.NewToolResultError(err.Error()), nil
+			}
+			filePath = loc.URI.Path()
+			line = int(loc.Range.Start.Line + 1)
+			column = int(loc.Range.Start.Character + 1)
+			lineOK = true
+			columnOK = true
 		}
 
-		var line, column int
-		switch v := request.Params.Arguments["line"].(type) {
-		case float64:
-			line = int(v)
-		case int:
-			line = v
-		default:
+		if filePath == "" {
+			return mcp.NewToolResultError("filePath is required unless symbolName resolves to a location"), nil
+		}
+		if !lineOK {
 			return mcp.NewToolResultError("line must be a number"), nil
 		}
-
-		switch v := request.Params.Arguments["column"].(type) {
-		case float64:
-			column = int(v)
-		case int:
-			column = v
-		default:
+		if !columnOK {
 			return mcp.NewToolResultError("column must be a number"), nil
 		}
 
 		depth := 1
-		if v, ok := request.Params.Arguments["depth"].(float64); ok {
-			depth = int(v)
+		if v, ok := readIntArgument(args, "depth"); ok {
+			depth = v
 			if depth > 10 {
 				depth = 10
 			}
@@ -777,12 +807,13 @@ func (s *mcpServer) registerTools() error {
 		}
 
 		coreLogger.Debug("Executing callees for %s:%d:%d depth=%d", filePath, line, column, depth)
-		text, err := tools.GetCallees(s.ctx, s.lspClient, filePath, line, column, depth)
+		data, err := tools.GetCalleesData(s.ctx, s.lspClient, filePath, line, column, depth)
 		if err != nil {
 			coreLogger.Error("Failed to get callees: %v", err)
 			return mcp.NewToolResultError(fmt.Sprintf("failed to get callees: %v", err)), nil
 		}
-		return mcp.NewToolResultText(text), nil
+		text := tools.FormatCallHierarchyData(data)
+		return newAppToolResult(data, text, "ui://call-hierarchy/graph"), nil
 	})
 
 	// Struct usage tools
@@ -801,16 +832,17 @@ func (s *mcpServer) registerTools() error {
 	)
 
 	s.mcpServer.AddTool(findStructUsageTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		structName, ok := request.Params.Arguments["structName"].(string)
+		args := request.GetArguments()
+		structName, ok := args["structName"].(string)
 		if !ok {
 			return mcp.NewToolResultError("structName must be a string"), nil
 		}
 
 		var filePath, language string
-		if v, ok := request.Params.Arguments["filePath"].(string); ok {
+		if v, ok := args["filePath"].(string); ok {
 			filePath = v
 		}
-		if v, ok := request.Params.Arguments["language"].(string); ok {
+		if v, ok := args["language"].(string); ok {
 			language = v
 		}
 
@@ -838,16 +870,17 @@ func (s *mcpServer) registerTools() error {
 	)
 
 	s.mcpServer.AddTool(findStructDefinitionTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		structName, ok := request.Params.Arguments["structName"].(string)
+		args := request.GetArguments()
+		structName, ok := args["structName"].(string)
 		if !ok {
 			return mcp.NewToolResultError("structName must be a string"), nil
 		}
 
 		var filePath, language string
-		if v, ok := request.Params.Arguments["filePath"].(string); ok {
+		if v, ok := args["filePath"].(string); ok {
 			filePath = v
 		}
-		if v, ok := request.Params.Arguments["language"].(string); ok {
+		if v, ok := args["language"].(string); ok {
 			language = v
 		}
 
@@ -877,4 +910,29 @@ func formatSearchResults(results []router.SearchResult) *mcp.CallToolResult {
 	}
 
 	return mcp.NewToolResultText(b.String())
+}
+
+func appToolMeta(resourceURI string) *mcp.Meta {
+	return mcp.NewMetaFromMap(map[string]any{
+		"ui": map[string]any{
+			"resourceUri": resourceURI,
+		},
+	})
+}
+
+func newAppToolResult(structured any, fallbackText, resourceURI string) *mcp.CallToolResult {
+	result := mcp.NewToolResultStructured(structured, fallbackText)
+	result.Meta = appToolMeta(resourceURI)
+	return result
+}
+
+func readIntArgument(args map[string]any, name string) (int, bool) {
+	switch v := args[name].(type) {
+	case float64:
+		return int(v), true
+	case int:
+		return v, true
+	default:
+		return 0, false
+	}
 }

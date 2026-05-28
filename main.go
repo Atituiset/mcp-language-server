@@ -113,7 +113,10 @@ func (s *mcpServer) start() error {
 		"v0.0.2",
 		server.WithLogging(),
 		server.WithRecovery(),
+		server.WithResourceCapabilities(false, true),
 	)
+
+	s.registerUIResources()
 
 	err := s.registerTools()
 	if err != nil {

@@ -3,7 +3,6 @@ package tools
 import (
 	"context"
 	"fmt"
-	"net/url"
 	"os"
 	"strings"
 
@@ -59,11 +58,7 @@ func GetFullDefinition(ctx context.Context, client *lsp.Client, startLocation pr
 	found = searchSymbols(symbols)
 
 	if found {
-		// Convert URI to filesystem path
-		filePath, err := url.PathUnescape(strings.TrimPrefix(string(startLocation.URI), "file://"))
-		if err != nil {
-			return "", protocol.Location{}, fmt.Errorf("failed to unescape URI: %w", err)
-		}
+		filePath := startLocation.URI.Path()
 
 		// Read the file to get the full lines of the definition
 		// because we may have a start and end column
