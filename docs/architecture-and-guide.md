@@ -241,7 +241,7 @@ main()
     │   │   ├── 注册 NotificationHandler (showMessage, publishDiagnostics)
     │   │   └── TypeScript 特殊初始化
     │   ├── go watcher.WatchWorkspace() # 后台启动文件监视
-    │   └── client.WaitForServerReady() # 等待 1 秒（TODO: 改进）
+│ └── client.WaitForServerReady() # 轮询 workspace/symbol（最多 15s）
     │
     ├── server.NewMCPServer() # 创建 MCP 服务器
     ├── registerUIResources() # 注册 MCP App UI 资源（调用层级图 + 诊断仪表盘）
@@ -831,14 +831,15 @@ type SourceLine struct {
 
 调用流程：
 
-```
+```go
 GetDiagnosticsForFile(ctx, client, filePath, contextLines, showLineNumbers)
 │
 ├── GetDiagnosticsDataForFile(ctx, client, filePath, contextLines, includeContext)
-│   ├── client.OpenFile()
-│   ├── ⚠️ time.Sleep(3s) — 等待诊断推送（仍然存在，TODO: 事件驱动）
-│   ├── client.Diagnostic() — 主动请求诊断
-│   ├── client.GetFileDiagnostics() — 从缓存读取
+│ ├── client.OpenFile()
+│ ├── client.WaitForDiagnostics(uri, 5s) — 事件驱动等待 publishDiagnostics 通知
+│ ├── client.Diagnostic() — 主动请求诊断（失败时返回 error）
+│ ├── client.WaitForDiagnostics(uri, 3s) — 等待主动请求后的诊断推送
+│ ├── client.GetFileDiagnostics() — 从缓存读取
 │   ├── 按严重程度分类计数 (Error/Warning/Info/Hint)
 │   ├── 构建 DiagnosticItem 列表
 │   ├── 读取文件内容
@@ -856,7 +857,7 @@ GetDiagnosticsForFile(ctx, client, filePath, contextLines, showLineNumbers)
            43 | buffer := getData()
 ```
 
-**⚠️ 关键遗留问题**：3 秒 `time.Sleep` 仍然存在（`diagnostics.go:103`），这是当前代码中最大的性能问题。GPT5.5 未修复此问题，仅添加了 TODO 注释。
+**已修复**：3 秒 `time.Sleep` 已替换为事件驱动的 `WaitForDiagnostics()` 机制。`OpenFile` 后等待 `publishDiagnostics` 通知（5s 超时），`Diagnostic()` 请求后再等待 3s，若 LSP 推送了诊断则立即返回，无需盲等。
 
 #### lsp-utilities.go — LSP 共享工具 (GPT5.5 新增/重构)
 
@@ -2217,48 +2218,53 @@ docker build -t mcp-language-server .
 
 ### 8.5 关键架构问题：统一搜索的 L3 层是假的
 
-**这是当前架构最严重的问题，GPT5.5 未修复。**
+**已修复**：Router 现已持有 LSP Client 引用（通过 `NewRouterWithClient()` 注入），`searchSymbol()` 优先调用 LSP `workspace/symbol`，不可用时回退到 ripgrep。
 
-`searchSymbol()`（统一搜索的 L3 层）**根本没有调用 LSP**，它只是用 ripgrep 开了大小写敏感模式，然后把结果标记为 "symbol" 层：
+修复前的代码：
 
 ```go
-// router.go:165-179
+// 旧 router.go: searchSymbol 只用 ripgrep
 func (r *Router) searchSymbol(ctx context.Context, opts SearchOptions) ([]SearchResult, error) {
-    // 使用 ripgrep 作为符号搜索的后备方案
-    // LSP 符号搜索需要精确的符号名称
     rgOpts := tools.RipgrepOptions{
-        MaxCount:     100,
+        MaxCount: 100,
         CaseSensitive: true,
     }
     result, err := tools.SearchCode(ctx, r.workspaceDir, opts.Query, rgOpts)
-    // ...
-    return []SearchResult{
-        {Layer: "symbol", Content: result, ...},
-    }, nil
+    return []SearchResult{{Layer: "symbol", Content: result, ...}}, nil
 }
 ```
 
-**影响**：
+修复后的逻辑：
 
-1. 当 LLM 使用 `search(query, strategy="auto")` 时，它以为三层都搜了，**实际上 L3 就是 L1 换了个标签**
-2. `searchAll()` 并行跑三个 goroutine，但其中 "symbol" 和 "text" 层都是 ripgrep（仅大小写敏感不同），**做了重复工作**
-3. 真正的 LSP 语义能力（definition、references、callers、callees、hover、diagnostics）**只能通过独立的 MCP 工具访问**，完全绕过了统一搜索路由器
-4. LLM 如果只用 `search` 统一入口，**实际上只用了 L1 + L2，丢失了最有价值的语义搜索能力**
+```go
+// 新 router.go: searchSymbol 优先 LSP，回退 ripgrep
+func (r *Router) searchSymbol(ctx context.Context, opts SearchOptions) ([]SearchResult, error) {
+    if r.lspClient != nil {
+        result, err := r.lspClient.Symbol(ctx, protocol.WorkspaceSymbolParams{Query: opts.Query})
+        if err == nil {
+            symbols, parseErr := result.Results()
+            if parseErr == nil && len(symbols) > 0 {
+                return []SearchResult{{Layer: "symbol", Content: formatSymbolResults(symbols), ...}}, nil
+            }
+        }
+    }
+    // 回退到 ripgrep
+    ...
+}
+```
 
-**根本原因**：Router 不持有 LSP Client 引用。Router 只依赖 `tools` 包（ripgrep 和 tree-sitter），完全不知道 LSP 的存在。要真正接入 L3，需要将 LSP Client 注入 Router。
-
-**GPT5.5 提供了部分缓解**：新增的 `ResolveSymbolLocation()` 已经证明从符号名到 LSP 位置的解析是可行的。但这个函数只在 `callers`/`callees` 工具中使用，没有被 Router 采用。
+**遗留问题**：searchAll() 中 L1 和 L3 的 ripgrep 回退仍有部分重复，但 L3 优先使用 LSP 时重复已消除。
 
 ### 8.6 路由关键词映射的潜在问题
 
-`routeByIntent()` 的关键词匹配中，`"definition"` 被归入 L2 (ast) 而非 L3 (symbol)：
+**已修复**：`"definition"` 和 `"declare"` 已从 L2 (ast) 关键词移至 L3 (symbol) 关键词，与 `definition` MCP 工具的语义保持一致。
+
+修复后的映射：
 
 ```
-L2 (ast) 关键词: function, struct, class, node, ast, syntax, definition, declare
-L3 (symbol) 关键词: symbol, reference, call, usage, import, type, variable
+L2 (ast) 关键词: function, struct, class, node, ast, syntax
+L3 (symbol) 关键词: symbol, reference, call, usage, import, type, variable, definition, declare
 ```
-
-这意味着 `intent="definition"` 会路由到 tree-sitter 而非 LSP。但 `definition` MCP 工具（用户最可能关联"定义查找"的工具）使用的是 LSP。这可能让 LLM 产生困惑。
 
 ### 8.7 GPT5.5 的改进评估
 
@@ -2270,8 +2276,8 @@ L3 (symbol) 关键词: symbol, reference, call, usage, import, type, variable
 | 共享工具函数 | GetFullDefinition 等散布在个别文件 | 提取到 lsp-utilities.go | 定义/引用/诊断共享逻辑 |
 | 搜索缓存 | 无 | TTL 缓存集成到 Router | 减少重复搜索 |
 | 组件日志 | 部分工具用 fmt 输出 | 统一 toolsLogger | 可配置级别 |
-| 诊断 3s sleep | 存在 | ⚠️ 仍然存在 | GPT5.5 添加了 TODO 但未修复 |
-| L3 symbol 假冒 | 存在 | ⚠️ 仍然存在 | Router 仍无 LSP 引用 |
+| 诊断 3s sleep | 存在 | ✅ 已修复 | 事件驱动 WaitForDiagnostics，通知到达即返回 |
+| L3 symbol 假冒 | 存在 | ✅ 已修复 | Router 注入 LSP Client，searchSymbol 优先 LSP workspace/symbol |
 
 ### 8.8 总结：到底有没有更好？
 
@@ -2283,24 +2289,25 @@ L3 (symbol) 关键词: symbol, reference, call, usage, import, type, variable
 | AST 结构查询 | **显著提升** | tree-sitter 的 CSP 查询和 AST 可视化是 LSP 没有的全新能力 |
 | 鲁棒性 | **明显提升** | 烂代码兼容、零配置可用、LSP 挂了还能用 L1/L2 |
 | 冷启动速度 | **明显提升** | ripgrep 毫秒级，tree-sitter 秒级，LSP 可能要 60 秒 |
-| 语义搜索 | **没有提升** | LSP 的语义能力仍然只能通过独立工具访问，未整合进统一搜索 |
-| 统一搜索体验 | **反而有误导** | L3 层是假的，LLM 可能以为已经做了语义搜索但其实没有 |
+| 语义搜索 | ✅ **已修复** | L3 层现在真正调用 LSP workspace/symbol，不可用时回退 ripgrep |
+| 统一搜索体验 | **已改善** | L3 层不再假冒，但 LSP 未就绪时仍回退到 ripgrep |
 | MCP App UI | **新增能力** (GPT5.5) | 调用层级图和诊断仪表盘提供了更好的可视化 |
 | 符号名调用 | **新增能力** (GPT5.5) | callers/callees 支持符号名，更自然 |
 | 搜索缓存 | **性能提升** (GPT5.5) | 重复搜索零延迟 |
 
-**最终判断**：ripgrep 和 tree-sitter 确实带来了 LSP 做不到的重要能力，在安全检视场景下尤其有价值（搜索硬编码密钥、搜索 TODO/FIXME、分析烂代码等）。GPT5.5 的数据/格式分离、MCP App UI、符号名解析和搜索缓存都是有意义的改进。但两个最根本的问题仍未修复：统一搜索的 L3 层是假的，诊断查询仍有 3 秒阻塞等待。LLM 需要足够聪明，知道什么时候该用 `search`（L1/L2），什么时候该用 `definition`/`references`/`callers`（真正的 L3）。
+**最终判断**：ripgrep 和 tree-sitter 确实带来了 LSP 做不到的重要能力，在安全检视场景下尤其有价值（搜索硬编码密钥、搜索 TODO/FIXME、分析烂代码等）。之前最根本的两个问题——统一搜索 L3 层假冒和诊断 3 秒阻塞——现已修复：Router 接入真实 LSP `workspace/symbol`，诊断改为事件驱动等待。`searchAll()` 去重、缓存键 SHA256 化、缓存主动失效、路由关键词修正等改进也均已落地。剩余可改进项：增量文件同步的实际 diff 计算、tree-sitter 语言扩展（Go/Rust）、搜索结果中标注 LSP vs ripgrep 来源。
 
 ### 8.9 改进建议
 
-| 优先级 | 改进 | 说明 |
-|--------|------|------|
-| **P0** | `searchSymbol()` 接入真正的 LSP `workspace/symbol` | 将 LSP Client 注入 Router，LSP 就绪时使用语义搜索，不可用时回退到 ripgrep |
-| **P0** | 消除诊断 3s sleep | 改为事件驱动：OpenFile 后等待 `publishDiagnostics` 通知（带超时） |
-| **P1** | 消除 `searchAll()` 中 L1 和 L3 的重复工作 | 两者都是 ripgrep，差异仅大小写敏感，应合并或去重 |
-| **P1** | 调整 `"definition"` 关键词到 L3 (symbol) | 与用户直觉和 `definition` 工具保持一致 |
-| **P1** | 缓存主动失效 | Watcher 检测到文件变更时清空相关缓存 |
-| **P2** | 扩展 tree-sitter 语言支持 | 至少增加 Go 和 Rust，与 LSP 服务器覆盖的语言对齐 |
-| **P2** | 统一搜索结果中标注数据来源 | 让 LLM 知道 "symbol" 层结果是来自 LSP 还是 ripgrep 后备 |
-| **P2** | 缓存键改用哈希 | 避免超长查询字符串导致的键冲突 |
-| **P3** | 文件同步改用增量模式 | 对大文件减少传输量 |
+| 优先级 | 改进 | 状态 | 说明 |
+|--------|------|------|------|
+| ~~P0~~ | ~~`searchSymbol()` 接入真正的 LSP `workspace/symbol`~~ | ✅ 已完成 | Router 注入 LSP Client，LSP 优先 + ripgrep 回退 |
+| ~~P0~~ | ~~消除诊断 3s sleep~~ | ✅ 已完成 | 事件驱动 `WaitForDiagnostics()`，通知到达即返回 |
+| ~~P1~~ | ~~消除 `searchAll()` 中 L1 和 L3 的重复工作~~ | ✅ 已完成 | L3 优先 LSP，重复仅在 LSP 不可用时出现 |
+| ~~P1~~ | ~~调整 `"definition"` 关键词到 L3 (symbol)~~ | ✅ 已完成 | 已移至 symbolKeywords |
+| ~~P1~~ | ~~缓存主动失效~~ | ✅ 已完成 | Watcher `OnFileChange` 回调清空缓存 |
+| ~~P2~~ | ~~缓存键改用哈希~~ | ✅ 已完成 | SHA256 + null-byte 分隔 + hex 编码 |
+| ~~P3~~ | ~~文件同步改用增量模式~~ | 🔄 部分完成 | 已检测 `syncKind`，`computeIncrementalChanges` 仍为 stub |
+| P2 | 扩展 tree-sitter 语言支持 | 待做 | 至少增加 Go 和 Rust，与 LSP 服务器覆盖的语言对齐 |
+| P2 | 统一搜索结果中标注数据来源 | 待做 | 让 LLM 知道 "symbol" 层结果是来自 LSP 还是 ripgrep 后备 |
+| P2 | 实现增量 diff 计算 | 待做 | `computeIncrementalChanges` 当前仍发送全文，需实现真正的行级 diff |
