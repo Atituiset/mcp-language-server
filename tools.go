@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/isaacphi/mcp-language-server/internal/tools"
@@ -13,8 +14,10 @@ import (
 func (s *mcpServer) registerTools() error {
 	coreLogger.Debug("Registering MCP tools")
 
+	debugTools := os.Getenv("MCP_LS_DEBUG_TOOLS") != ""
+
 	applyTextEditTool := mcp.NewTool("edit_file",
-		mcp.WithDescription("Apply multiple text edits to a file."),
+		mcp.WithDescription("Use to apply precise line-range text replacements in a file. startLine/endLine are 1-indexed and inclusive; leave newText empty to delete lines."),
 		mcp.WithArray("edits",
 			mcp.Required(),
 			mcp.Description("List of edits to apply"),
@@ -99,7 +102,7 @@ func (s *mcpServer) registerTools() error {
 	})
 
 	readDefinitionTool := mcp.NewTool("definition",
-		mcp.WithDescription("Read the source code definition of a symbol (function, type, constant, etc.) from the codebase. Returns the complete implementation code where the symbol is defined."),
+		mcp.WithDescription("Use when you already know a symbol's name and need its complete implementation source code. Do NOT use for exploratory or fuzzy search — use search first."),
 		mcp.WithString("symbolName",
 			mcp.Required(),
 			mcp.Description("The name of the symbol whose definition you want to find (e.g. 'mypackage.MyFunction', 'MyType.MyMethod')"),
@@ -124,7 +127,7 @@ func (s *mcpServer) registerTools() error {
 	})
 
 	findReferencesTool := mcp.NewTool("references",
-		mcp.WithDescription("Find all usages and references of a symbol throughout the codebase. Returns a list of all files and locations where the symbol appears."),
+		mcp.WithDescription("Use when you know a symbol's name and need every location that references it across the codebase. Do NOT use for keyword or pattern search — use search."),
 		mcp.WithString("symbolName",
 			mcp.Required(),
 			mcp.Description("The name of the symbol to search for (e.g. 'mypackage.MyFunction', 'MyType')"),
@@ -149,7 +152,7 @@ func (s *mcpServer) registerTools() error {
 	})
 
 	getDiagnosticsTool := mcp.NewTool("diagnostics",
-		mcp.WithDescription("Get diagnostic information for a specific file from the language server."),
+		mcp.WithDescription("Use after editing a file to check compiler errors and warnings reported by the language server. Requires an exact filePath; do NOT use for files you have not opened or edited."),
 		mcp.WithString("filePath",
 			mcp.Required(),
 			mcp.Description("The path to the file to get diagnostics for"),
@@ -261,7 +264,7 @@ func (s *mcpServer) registerTools() error {
 	// })
 
 	hoverTool := mcp.NewTool("hover",
-		mcp.WithDescription("Get hover information (type, documentation) for a symbol at the specified position."),
+		mcp.WithDescription("Use when you need the type signature or documentation of the symbol at a known file:line:column position. Do NOT use when you only know a name — use definition or search."),
 		mcp.WithString("filePath",
 			mcp.Required(),
 			mcp.Description("The path to the file to get hover information for"),
@@ -314,7 +317,7 @@ func (s *mcpServer) registerTools() error {
 	})
 
 	renameSymbolTool := mcp.NewTool("rename_symbol",
-		mcp.WithDescription("Rename a symbol (variable, function, class, etc.) at the specified position and update all references throughout the codebase."),
+		mcp.WithDescription("Use to rename a symbol at a known file:line:column position and update all references codebase-wide. Requires the exact position of the symbol."),
 		mcp.WithString("filePath",
 			mcp.Required(),
 			mcp.Description("The path to the file containing the symbol to rename"),
@@ -522,7 +525,7 @@ func (s *mcpServer) registerTools() error {
 	searchRouter := s.searchRouter
 
 	searchTool := mcp.NewTool("search",
-		mcp.WithDescription("Unified search across all layers. Use this as the primary search tool. Specify strategy='auto' for intelligent routing or use 'text'/'ast'/'symbol' to explicitly choose a layer."),
+		mcp.WithDescription("Primary search entry — use this FIRST whenever you need to find code, symbols, or text in the workspace. strategy='auto' (default) routes intelligently across text/AST/symbol layers; set 'text'/'ast'/'symbol' only to force a layer. Use filePath to narrow scope. Do NOT use this to read a known symbol's full implementation — use definition instead."),
 		mcp.WithString("query",
 			mcp.Required(),
 			mcp.Description("What to search for"),
@@ -675,7 +678,7 @@ func (s *mcpServer) registerTools() error {
 
 	// Call hierarchy tools
 	callersTool := mcp.NewTool("callers",
-		mcp.WithDescription("Find functions that call a function (incoming call hierarchy). Prefer filePath+line+column for precise agent calls; use symbolName for chat-style calls."),
+		mcp.WithDescription("Use when you need to know who calls a function (incoming call hierarchy), e.g. tracing untrusted data sources upward. Prefer filePath+line+column for precision. depth defaults to 1 and is clamped to 3 — do not request larger depths; iterate with follow-up calls instead."),
 		mcp.WithString("symbolName",
 			mcp.Description("Symbol name to resolve when filePath, line, and column are not provided"),
 		),
@@ -689,7 +692,7 @@ func (s *mcpServer) registerTools() error {
 			mcp.Description("Column number where the function is located, 1-indexed. Required unless symbolName is provided"),
 		),
 		mcp.WithNumber("depth",
-			mcp.Description("Maximum depth to traverse (default: 1, max: 10)"),
+			mcp.Description("Maximum depth to traverse (default: 1, max: 3)"),
 		),
 	)
 	callersTool.Meta = appToolMeta("ui://call-hierarchy/graph")
@@ -727,8 +730,8 @@ func (s *mcpServer) registerTools() error {
 		depth := 1
 		if v, ok := readIntArgument(args, "depth"); ok {
 			depth = v
-			if depth > 10 {
-				depth = 10
+			if depth > 3 {
+				depth = 3
 			}
 			if depth < 1 {
 				depth = 1
@@ -746,7 +749,7 @@ func (s *mcpServer) registerTools() error {
 	})
 
 	calleesTool := mcp.NewTool("callees",
-		mcp.WithDescription("Find functions called by a function (outgoing call hierarchy). Prefer filePath+line+column for precise agent calls; use symbolName for chat-style calls."),
+		mcp.WithDescription("Use when you need to know what a function calls (outgoing call hierarchy), e.g. tracing sinks downward. Same parameters as callers; depth defaults to 1 and is clamped to 3."),
 		mcp.WithString("symbolName",
 			mcp.Description("Symbol name to resolve when filePath, line, and column are not provided"),
 		),
@@ -760,7 +763,7 @@ func (s *mcpServer) registerTools() error {
 			mcp.Description("Column number where the function is located, 1-indexed. Required unless symbolName is provided"),
 		),
 		mcp.WithNumber("depth",
-			mcp.Description("Maximum depth to traverse (default: 1, max: 10)"),
+			mcp.Description("Maximum depth to traverse (default: 1, max: 3)"),
 		),
 	)
 	calleesTool.Meta = appToolMeta("ui://call-hierarchy/graph")
@@ -798,8 +801,8 @@ func (s *mcpServer) registerTools() error {
 		depth := 1
 		if v, ok := readIntArgument(args, "depth"); ok {
 			depth = v
-			if depth > 10 {
-				depth = 10
+			if depth > 3 {
+				depth = 3
 			}
 			if depth < 1 {
 				depth = 1
@@ -893,9 +896,20 @@ func (s *mcpServer) registerTools() error {
 		return mcp.NewToolResultText(text), nil
 	})
 
+	if !debugTools {
+		s.mcpServer.DeleteTools(
+			"search_text", "search_ast", "search_symbol",
+			"ripgrep", "treesitter_query", "treesitter_ast",
+			"find_struct_usage", "find_struct_definition",
+		)
+		coreLogger.Info("Debug tools disabled; set MCP_LS_DEBUG_TOOLS=1 to enable all 17 tools")
+	}
+
 	coreLogger.Info("Successfully registered all MCP tools")
 	return nil
 }
+
+const maxTotalSearchBytes = 12 * 1024
 
 func formatSearchResults(results []router.SearchResult) *mcp.CallToolResult {
 	if len(results) == 0 {
@@ -909,7 +923,20 @@ func formatSearchResults(results []router.SearchResult) *mcp.CallToolResult {
 		b.WriteString("\n\n")
 	}
 
-	return mcp.NewToolResultText(b.String())
+	out := b.String()
+	if len(out) > maxTotalSearchBytes {
+		out = out[:maxTotalSearchBytes]
+		if idx := strings.LastIndex(out, "\n"); idx > 0 {
+			out = out[:idx]
+		}
+		omitted := strings.Count(b.String(), "\n") - strings.Count(out, "\n")
+		if omitted < 1 {
+			omitted = 1
+		}
+		out += fmt.Sprintf("\n... [truncated, %d more lines, use filePath or strategy=text|ast|symbol to narrow]\n", omitted)
+	}
+
+	return mcp.NewToolResultText(out)
 }
 
 func appToolMeta(resourceURI string) *mcp.Meta {

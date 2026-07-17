@@ -113,8 +113,8 @@ func NewSearchResultCache(ttl time.Duration) *SearchResultCache {
 	}
 }
 
-func SearchCacheKey(query, strategy, filePath, language string) string {
-	return generateKey(query, strategy, filePath, language)
+func SearchCacheKey(query, strategy, filePath, language, intent string) string {
+	return generateKey(query, strategy, filePath, language, intent)
 }
 
 func StructCacheKey(structName, filePath, language string) string {

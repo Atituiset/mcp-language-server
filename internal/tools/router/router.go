@@ -63,7 +63,7 @@ func (r *Router) Search(ctx context.Context, opts SearchOptions) ([]SearchResult
 		strategy = "auto"
 	}
 
-	cacheKey := cache.SearchCacheKey(opts.Query, strategy, opts.FilePath, opts.Language)
+	cacheKey := cache.SearchCacheKey(opts.Query, strategy, opts.FilePath, opts.Language, opts.Intent)
 
 	if r.cache != nil {
 		if cached, found := r.cache.Get(cacheKey); found {
@@ -87,6 +87,16 @@ func (r *Router) Search(ctx context.Context, opts SearchOptions) ([]SearchResult
 		results, err = r.searchAuto(ctx, opts)
 	default:
 		results, err = r.searchAuto(ctx, opts)
+	}
+
+	if err == nil {
+		for i := range results {
+			hint := results[i].Layer
+			if hint == "symbol-fallback-text" {
+				hint = "symbol"
+			}
+			results[i].Content = truncateLayerContent(results[i].Content, hint)
+		}
 	}
 
 	if err == nil && r.cache != nil {
@@ -159,8 +169,9 @@ func (r *Router) searchSymbol(ctx context.Context, opts SearchOptions) ([]Search
 	if err != nil {
 		return nil, err
 	}
+	content := "WARNING: LSP unavailable, results are plain text matches\n" + result
 	return []SearchResult{
-		{Layer: "symbol", Content: result, Count: countLines(result)},
+		{Layer: "symbol-fallback-text", Content: content, Count: countLines(result)},
 	}, nil
 }
 
@@ -219,9 +230,9 @@ func (r *Router) searchAll(ctx context.Context, opts SearchOptions) ([]SearchRes
 func (r *Router) routeByIntent(intent string) string {
 	intent = strings.ToLower(intent)
 
-	textKeywords := []string{"todo", "fixme", "comment", "string", "text", "pattern", "word", "find text"}
-	astKeywords := []string{"function", "struct", "class", "node", "ast", "syntax"}
-	symbolKeywords := []string{"symbol", "reference", "call", "usage", "import", "type", "variable", "definition", "declare"}
+	textKeywords := []string{"todo", "fixme", "comment", "string", "text", "pattern", "word", "find text", "注释", "文本", "待办"}
+	astKeywords := []string{"function", "struct", "class", "node", "ast", "syntax", "函数", "结构体", "语法"}
+	symbolKeywords := []string{"symbol", "reference", "call", "usage", "import", "type", "variable", "definition", "declare", "定义", "引用", "调用", "声明"}
 
 	for _, kw := range textKeywords {
 		if strings.Contains(intent, kw) {
@@ -260,4 +271,40 @@ func countLines(s string) int {
 		return 0
 	}
 	return strings.Count(s, "\n") + 1
+}
+
+const (
+	maxLayerLines = 50
+	maxLayerBytes = 4 * 1024
+)
+
+// truncateLayerContent caps a single layer's output at maxLayerLines lines and
+// maxLayerBytes bytes, whichever hits first. When truncation occurs, a hint
+// telling the caller how to narrow the search is appended.
+func truncateLayerContent(content, strategy string) string {
+	lines := strings.Split(content, "\n")
+	truncated := false
+	if len(lines) > maxLayerLines {
+		lines = lines[:maxLayerLines]
+		truncated = true
+	}
+
+	out := strings.Join(lines, "\n")
+	if len(out) > maxLayerBytes {
+		out = out[:maxLayerBytes]
+		if idx := strings.LastIndex(out, "\n"); idx > 0 {
+			out = out[:idx]
+		}
+		truncated = true
+	}
+
+	if !truncated {
+		return content
+	}
+
+	omitted := countLines(content) - countLines(out)
+	if omitted < 1 {
+		omitted = 1
+	}
+	return fmt.Sprintf("%s\n... [truncated, %d more lines, use strategy=%s with filePath to narrow]\n", out, omitted, strategy)
 }
