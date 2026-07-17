@@ -158,6 +158,7 @@ UPDATE_SNAPSHOTS=true go test ./integrationtests/...  # 更新快照（工具面
 
 ## 6. 注意事项
 
+- **后续优化点已归档**：见《docs/optimization-backlog.md》（P1 正确性 / P2 能力增强 / P3 压测仓扩展，共 15 项 + 已完成备查）。新 session 接续工作时优先从 P1 开始。
 - 旧 `docs/tools-opt.md` 的核心错误：假设 14 工具、建议"新建统一搜索入口"（实际已存在 `search`+router）。重写时明确说明这一修正。
 - `main.go:113-116` 的文件变更全量清缓存策略在百万行仓上可能过激进（一次保存清空全部搜索缓存），可作为 P2 优化点写入新文档。
 - `docs/code-atom-ir.md` 是后续方向（SemanticID/USR、字节偏移去重、L0/L1/L2 降级载荷、token 预算裁剪），本批任务不涉及，但 B2 截断策略可引用其"降级而非丢弃"思想。
