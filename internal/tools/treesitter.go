@@ -10,10 +10,48 @@ import (
 
 // TreesitterOptions tree-sitter 搜索选项（保留用于扩展）
 type TreesitterOptions struct {
-	Language  string // 语言类型: "c" 或 "cpp"
-	FilePath  string // 文件路径
-	NodeType  string // 节点类型过滤
-	MaxDepth  int    // 最大遍历深度
+	Language string // 语言类型: "c" 或 "cpp"
+	FilePath string // 文件路径
+	NodeType string // 节点类型过滤
+	MaxDepth int    // 最大遍历深度
+}
+
+// RunTreesitterQueryResults is the structured variant of RunTreesitterQuery:
+// it returns the raw query results (with byte offsets) for normalization
+// into atoms.
+func RunTreesitterQueryResults(ctx context.Context, workspaceDir, query, filePath, language string) ([]treesitter.QueryResult, error) {
+	if language == "" {
+		language = "cpp"
+	}
+
+	if filePath != "" {
+		// 在指定文件中查询
+		parser := treesitter.NewParser(language)
+		defer parser.Close()
+
+		tree, source, parseErr := parser.ParseFile(ctx, filePath)
+		if parseErr != nil {
+			return nil, fmt.Errorf("failed to parse file: %w", parseErr)
+		}
+		defer tree.Close()
+
+		results, err := treesitter.RunQuery(tree, source, parser.Language(), query)
+		if err != nil {
+			return nil, fmt.Errorf("query failed: %w", err)
+		}
+
+		for i := range results {
+			results[i].FilePath = filePath
+		}
+		return results, nil
+	}
+
+	// 在整个工作区中查询
+	results, err := treesitter.QueryDirectory(workspaceDir, query, language)
+	if err != nil {
+		return nil, fmt.Errorf("directory query failed: %w", err)
+	}
+	return results, nil
 }
 
 // RunTreesitterQuery 执行 tree-sitter CSP 查询
@@ -29,38 +67,9 @@ type TreesitterOptions struct {
 //
 // 返回: 格式化的查询结果
 func RunTreesitterQuery(ctx context.Context, workspaceDir, query, filePath, language string) (string, error) {
-	if language == "" {
-		language = "cpp"
-	}
-
-	var results []treesitter.QueryResult
-	var err error
-
-	if filePath != "" {
-		// 在指定文件中查询
-		parser := treesitter.NewParser(language)
-		defer parser.Close()
-
-		tree, source, parseErr := parser.ParseFile(ctx, filePath)
-		if parseErr != nil {
-			return "", fmt.Errorf("failed to parse file: %w", parseErr)
-		}
-		defer tree.Close()
-
-		results, err = treesitter.RunQuery(tree, source, parser.Language(), query)
-		if err != nil {
-			return "", fmt.Errorf("query failed: %w", err)
-		}
-
-		for i := range results {
-			results[i].FilePath = filePath
-		}
-	} else {
-		// 在整个工作区中查询
-		results, err = treesitter.QueryDirectory(workspaceDir, query, language)
-		if err != nil {
-			return "", fmt.Errorf("directory query failed: %w", err)
-		}
+	results, err := RunTreesitterQueryResults(ctx, workspaceDir, query, filePath, language)
+	if err != nil {
+		return "", err
 	}
 
 	if len(results) == 0 {

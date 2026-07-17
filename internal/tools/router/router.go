@@ -1,8 +1,10 @@
 package router
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -10,7 +12,9 @@ import (
 	"github.com/isaacphi/mcp-language-server/internal/lsp"
 	"github.com/isaacphi/mcp-language-server/internal/protocol"
 	"github.com/isaacphi/mcp-language-server/internal/tools"
+	"github.com/isaacphi/mcp-language-server/internal/tools/atom"
 	"github.com/isaacphi/mcp-language-server/internal/tools/cache"
+	"github.com/isaacphi/mcp-language-server/internal/tools/treesitter"
 )
 
 type Router struct {
@@ -101,6 +105,9 @@ func (r *Router) Search(ctx context.Context, opts SearchOptions) ([]SearchResult
 
 	if err == nil {
 		for i := range results {
+			if results[i].Layer == "unified" {
+				continue // unified output carries its own budget cap
+			}
 			hint := results[i].Layer
 			if hint == "symbol-fallback-text" {
 				hint = "symbol"
@@ -207,40 +214,258 @@ func (r *Router) searchAuto(ctx context.Context, opts SearchOptions) ([]SearchRe
 	return r.searchAll(ctx, opts)
 }
 
+// unifiedBudgetBytes is the payload budget for searchAll output
+// (docs/code-atom-ir.md §4). Rendered overhead (file headers, per-atom
+// tags) adds ~25%, so 8KB of payload stays well under the 12KB total cap.
+const unifiedBudgetBytes = 8 * 1024
+
+// searchAll fans out to all three layers, then normalizes the heterogeneous
+// results into CodeAtoms and applies merge/dedup/budget-crop
+// (docs/code-atom-ir.md §1-§4) instead of raw concatenation.
 func (r *Router) searchAll(ctx context.Context, opts SearchOptions) ([]SearchResult, error) {
 	var wg sync.WaitGroup
 	var mu sync.Mutex
-	results := []SearchResult{}
+
+	var textMatches []tools.TextMatch
+	var astResults []treesitter.QueryResult
+	var symbols []protocol.WorkspaceSymbolResult
+	var symbolFallback bool
 	errors := []error{}
 
-	searchFns := []func(context.Context, SearchOptions) ([]SearchResult, error){
-		r.searchText,
-		r.searchAST,
-		r.searchSymbol,
-	}
-
-	for _, fn := range searchFns {
-		wg.Add(1)
-		go func(f func(context.Context, SearchOptions) ([]SearchResult, error)) {
-			defer wg.Done()
-			result, err := f(ctx, opts)
-			mu.Lock()
-			defer mu.Unlock()
-			if err != nil {
-				errors = append(errors, err)
-			} else {
-				results = append(results, result...)
-			}
-		}(fn)
-	}
-
+	wg.Add(3)
+	go func() {
+		defer wg.Done()
+		rgOpts := tools.RipgrepOptions{
+			MaxCount:      opts.MaxCount,
+			ContextLines:  opts.ContextLines,
+			CaseSensitive: opts.CaseSensitive,
+			WholeWord:     opts.WholeWord,
+		}
+		if rgOpts.MaxCount <= 0 {
+			rgOpts.MaxCount = 100
+		}
+		m, err := tools.SearchCodeMatches(ctx, r.workspaceDir, opts.Query, rgOpts)
+		mu.Lock()
+		defer mu.Unlock()
+		if err != nil {
+			errors = append(errors, err)
+		} else {
+			textMatches = m
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		language := opts.Language
+		if language == "" {
+			language = "cpp"
+		}
+		res, err := tools.RunTreesitterQueryResults(ctx, r.workspaceDir, opts.Query, opts.FilePath, language)
+		mu.Lock()
+		defer mu.Unlock()
+		if err != nil {
+			errors = append(errors, err)
+		} else {
+			astResults = res
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		syms, fallback, err := r.querySymbols(ctx, opts.Query)
+		mu.Lock()
+		defer mu.Unlock()
+		if err != nil {
+			errors = append(errors, err)
+		} else {
+			symbols = syms
+			symbolFallback = fallback
+		}
+	}()
 	wg.Wait()
 
-	if len(results) == 0 && len(errors) > 0 {
-		return nil, errors[0]
+	// Normalize sequentially (file reads for byte-offset conversion are cached).
+	var atoms []atom.CodeAtom
+	atoms = append(atoms, atomsFromTextMatches(textMatches, "rg")...)
+	atoms = append(atoms, atomsFromTreeSitter(astResults)...)
+	fileCache := map[string][]byte{}
+	atoms = append(atoms, atomsFromSymbols(symbols, fileCache)...)
+
+	if symbolFallback {
+		fbMatches, err := tools.SearchCodeMatches(ctx, r.workspaceDir, opts.Query, tools.RipgrepOptions{
+			MaxCount:      100,
+			CaseSensitive: true,
+		})
+		if err != nil {
+			errors = append(errors, err)
+		} else {
+			atoms = append(atoms, atomsFromTextMatches(fbMatches, "rg(lsp-fallback)")...)
+		}
 	}
 
-	return results, nil
+	if len(atoms) == 0 {
+		if len(errors) > 0 {
+			return nil, errors[0]
+		}
+		return []SearchResult{{Layer: "unified", Content: "No results found", Count: 0}}, nil
+	}
+
+	atoms = atom.MergePhysical(atoms)
+	atoms = atom.DedupSemantic(atoms)
+	kept, stats := atom.CropBudget(atoms, unifiedBudgetBytes)
+
+	content := atom.Render(kept, stats)
+	if symbolFallback {
+		content = "WARNING: LSP unavailable, results are plain text matches\n" + content
+	}
+
+	return []SearchResult{{Layer: "unified", Content: content, Count: stats.Total - stats.Dropped}}, nil
+}
+
+// querySymbols queries the LSP workspace/symbol endpoint. fallback=true
+// means the symbol layer is unavailable (no client, error, or empty) and
+// the caller should degrade to text search.
+func (r *Router) querySymbols(ctx context.Context, query string) ([]protocol.WorkspaceSymbolResult, bool, error) {
+	if r.lspClient != nil {
+		result, err := r.lspClient.Symbol(ctx, protocol.WorkspaceSymbolParams{Query: query})
+		if err != nil {
+			return nil, false, err
+		}
+		symbols, parseErr := result.Results()
+		if parseErr != nil {
+			return nil, false, parseErr
+		}
+		if len(symbols) > 0 {
+			return symbols, false, nil
+		}
+	}
+	return nil, true, nil
+}
+
+// atomsFromTextMatches normalizes ripgrep matches (docs §1: line-level plain
+// text, physical coordinates only, lowest priority).
+func atomsFromTextMatches(matches []tools.TextMatch, source string) []atom.CodeAtom {
+	atoms := make([]atom.CodeAtom, 0, len(matches))
+	for _, m := range matches {
+		text := strings.TrimSpace(m.Text)
+		atoms = append(atoms, atom.CodeAtom{
+			SemanticID:  fmt.Sprintf("%s:%d", m.Path, m.Offset),
+			Name:        truncateLine(text, 60),
+			Kind:        atom.KindSnippet,
+			FilePath:    m.Path,
+			StartByte:   m.Offset,
+			EndByte:     m.Offset + len(m.Text),
+			FullContent: m.Text,
+			Signature:   truncateLine(text, 120),
+			Reference:   fmt.Sprintf("%s:%d: %s", m.Path, m.Line, truncateLine(text, 60)),
+			SourceTool:  source,
+			Priority:    1,
+		})
+	}
+	return atoms
+}
+
+// atomsFromTreeSitter normalizes AST nodes (docs §1: local syntax-tree nodes
+// with native byte ranges and a temporary ID from path+node-type+offset).
+func atomsFromTreeSitter(results []treesitter.QueryResult) []atom.CodeAtom {
+	atoms := make([]atom.CodeAtom, 0, len(results))
+	for _, r := range results {
+		atoms = append(atoms, atom.CodeAtom{
+			SemanticID:  fmt.Sprintf("%s:%s:%d", r.FilePath, r.NodeType, r.StartByte),
+			Name:        r.Capture,
+			Kind:        atomKindFromNodeType(r.NodeType),
+			FilePath:    r.FilePath,
+			StartByte:   int(r.StartByte),
+			EndByte:     int(r.EndByte),
+			FullContent: r.Content,
+			Signature:   truncateLine(strings.TrimSpace(r.Content), 120),
+			Reference:   fmt.Sprintf("%s:%d: [%s] %s", r.FilePath, r.Line, r.Capture, truncateLine(strings.TrimSpace(r.Content), 60)),
+			SourceTool:  "tree-sitter",
+			Priority:    2,
+		})
+	}
+	return atoms
+}
+
+// atomsFromSymbols normalizes LSP symbols (docs §1: global semantic symbols;
+// Phase 1 uses FQN-style IDs since LSP does not expose USRs, and carries no
+// FullContent to avoid per-symbol definition round-trips).
+func atomsFromSymbols(symbols []protocol.WorkspaceSymbolResult, fileCache map[string][]byte) []atom.CodeAtom {
+	atoms := make([]atom.CodeAtom, 0, len(symbols))
+	for _, sym := range symbols {
+		loc := sym.GetLocation()
+		path := loc.URI.Path()
+		line := int(loc.Range.Start.Line) + 1
+		name := sym.GetName()
+		offset := byteOffsetOfLine(path, line-1, fileCache)
+		endByte := -1
+		if offset >= 0 {
+			endByte = offset + len(name)
+		}
+		atoms = append(atoms, atom.CodeAtom{
+			SemanticID: fmt.Sprintf("%s@%s", name, path),
+			Name:       name,
+			Kind:       atom.KindSymbol,
+			FilePath:   path,
+			StartByte:  offset,
+			EndByte:    endByte,
+			Signature:  name,
+			Reference:  fmt.Sprintf("%s:%d: %s", path, line, name),
+			SourceTool: "clangd",
+			Priority:   3,
+		})
+	}
+	return atoms
+}
+
+// byteOffsetOfLine converts a 0-indexed line number to a byte offset.
+// Returns -1 when the file cannot be read or the line is out of range.
+func byteOffsetOfLine(path string, line int, fileCache map[string][]byte) int {
+	if line < 0 {
+		return -1
+	}
+	content, ok := fileCache[path]
+	if !ok {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			fileCache[path] = nil
+			return -1
+		}
+		content = data
+		fileCache[path] = content
+	}
+	if content == nil {
+		return -1
+	}
+	offset := 0
+	for l := 0; l < line; l++ {
+		idx := bytes.IndexByte(content[offset:], '\n')
+		if idx < 0 {
+			return -1
+		}
+		offset += idx + 1
+	}
+	return offset
+}
+
+// atomKindFromNodeType maps tree-sitter node types to atom kinds.
+func atomKindFromNodeType(nodeType string) atom.Kind {
+	switch nodeType {
+	case "function_definition", "function_declarator", "method_definition":
+		return atom.KindFunction
+	case "struct_specifier", "class_specifier", "union_specifier", "enum_specifier":
+		return atom.KindStruct
+	case "preproc_def", "preproc_function_def":
+		return atom.KindMacro
+	default:
+		return atom.KindSnippet
+	}
+}
+
+func truncateLine(s string, maxLen int) string {
+	s = strings.ReplaceAll(s, "\n", " ")
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "..."
 }
 
 func (r *Router) routeByIntent(intent string) string {

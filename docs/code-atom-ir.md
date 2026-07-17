@@ -1,6 +1,20 @@
 在集成 `rg`（物理检索）、`tree-sitter` / `ast-grep`（语法解析）与 `clangd/LSP`（编译语义）的异构分析系统架构中，**异构结果的归一化（Normalization）是破局上下文爆炸与信噪比失衡的唯一核心解法**。
 
-将其从多源日志拼接，升级为“编译级语义图谱组装”，完整架构分析与落地结论如下：
+---
+
+## 落地状态（2026-07-17，Phase 1 已实现）
+
+本文档的架构已在代码中落地第一阶段（`internal/tools/atom` + `router.searchAll`）：
+
+- **§2 IR 结构**：`atom.CodeAtom` 字段与设计一致（SemanticID/Name/Kind/FilePath/StartByte/EndByte/L0-L2 载荷/SourceTool/Priority）。
+- **§1 归一化**：三层产出在 `router.searchAll` 中归一为原子（rg→SNIPPET、tree-sitter→带原生字节范围的节点、clangd→符号）。
+- **§3.1 扫描线吞并**：`atom.MergePhysical`（含 StartByte<0 无坐标豁免）。
+- **§3.2 语义去重**：`atom.DedupSemantic`（保留最高 Priority）。
+- **§4 四相预算裁剪**：`atom.CropBudget`（L0→L1→L2→丢弃，计费含渲染开销保证预算诚实）。
+
+**与本文的偏离项（Phase 1）**：USR 不可得（LSP 协议不暴露），符号 SemanticID 降级为 `name@path`；rg 命中不扩展 ±2 行；交错范围直接吞并（不做 LCA 合并）；父子结构折叠未实现；symbol 原子无 L0 载荷（避免逐符号 definition 往返）。**适用路径**：仅 `search`（auto 且无 intent）；显式单层 strategy 与 intent 路由仍走原路径。
+
+**实测**（u-boot，176 万行，`search auto TODO`）：5569 条原始命中 → 吞并+去重后 1683 原子 → 8KB 预算输出 7,892B（85 条 L0 + 统计头 + 窄化提示）。
 
 ---
 

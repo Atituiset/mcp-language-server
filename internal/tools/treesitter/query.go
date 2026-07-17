@@ -13,10 +13,15 @@ import (
 type QueryResult struct {
 	Node     *sitter.Node
 	Capture  string
+	NodeType string
 	Content  string
 	FilePath string
 	Line     uint32
 	Column   uint32
+	// Byte offsets of the node in the source file, captured while the
+	// parse tree is still alive (Node pointers dangle after tree.Close).
+	StartByte uint32
+	EndByte   uint32
 }
 
 func RunQuery(tree *sitter.Tree, source []byte, lang *sitter.Language, pattern string) ([]QueryResult, error) {
@@ -43,11 +48,14 @@ func RunQuery(tree *sitter.Tree, source []byte, lang *sitter.Language, pattern s
 			start := c.Node.StartPoint()
 			content := c.Node.Content(source)
 			results = append(results, QueryResult{
-				Node:     c.Node,
-				Capture:  q.CaptureNameForId(c.Index),
-				Content:  content,
-				Line:     start.Row + 1,
-				Column:   start.Column + 1,
+				Node:      c.Node,
+				Capture:   q.CaptureNameForId(c.Index),
+				NodeType:  c.Node.Type(),
+				Content:   content,
+				Line:      start.Row + 1,
+				Column:    start.Column + 1,
+				StartByte: c.Node.StartByte(),
+				EndByte:   c.Node.EndByte(),
 			})
 		}
 	}

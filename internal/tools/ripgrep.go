@@ -22,6 +22,32 @@ type RipgrepOptions struct {
 
 // SearchCode performs a ripgrep search in the given workspace directory
 func SearchCode(ctx context.Context, workspaceDir, pattern string, opts RipgrepOptions) (string, error) {
+	output, err := runRipgrep(ctx, workspaceDir, pattern, opts)
+	if err != nil {
+		return "", err
+	}
+	return parseRipgrepOutput(output, opts.ContextLines)
+}
+
+// TextMatch is a single ripgrep match with its position and byte offset.
+type TextMatch struct {
+	Path   string // path relative to the workspace
+	Line   int    // 1-indexed line number
+	Offset int    // byte offset of the matched line start (rg absolute_offset)
+	Text   string // trimmed line content
+}
+
+// SearchCodeMatches is the structured variant of SearchCode: it returns
+// parsed matches instead of formatted text, for normalization into atoms.
+func SearchCodeMatches(ctx context.Context, workspaceDir, pattern string, opts RipgrepOptions) ([]TextMatch, error) {
+	output, err := runRipgrep(ctx, workspaceDir, pattern, opts)
+	if err != nil {
+		return nil, err
+	}
+	return parseRipgrepMatches(output), nil
+}
+
+func runRipgrep(ctx context.Context, workspaceDir, pattern string, opts RipgrepOptions) ([]byte, error) {
 	args := []string{
 		"--json",
 		"--max-count", strconv.Itoa(opts.MaxCount),
@@ -53,13 +79,16 @@ func SearchCode(ctx context.Context, workspaceDir, pattern string, opts RipgrepO
 
 	output, err := cmd.Output()
 	if err != nil {
-		if stderr.Len() > 0 {
-			return "", fmt.Errorf("ripgrep error: %s", stderr.String())
+		if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 && stderr.Len() == 0 {
+			return output, nil // rg exit 1: no matches, not an error
 		}
-		return "", fmt.Errorf("ripgrep failed: %v", err)
+		if stderr.Len() > 0 {
+			return nil, fmt.Errorf("ripgrep error: %s", stderr.String())
+		}
+		return nil, fmt.Errorf("ripgrep failed: %v", err)
 	}
 
-	return parseRipgrepOutput(output, opts.ContextLines)
+	return output, nil
 }
 
 type ripgrepMatch struct {
@@ -71,12 +100,42 @@ type ripgrepMatch struct {
 		Lines struct {
 			Text string `json:"text"`
 		} `json:"lines"`
-		LineNumber int `json:"line_number"`
-		Submatches []struct {
+		LineNumber     int `json:"line_number"`
+		AbsoluteOffset int `json:"absolute_offset"`
+		Submatches     []struct {
 			Start int `json:"start"`
 			End   int `json:"end"`
 		} `json:"submatches"`
 	} `json:"data"`
+}
+
+// parseRipgrepMatches converts ripgrep --json output into structured matches.
+func parseRipgrepMatches(output []byte) []TextMatch {
+	var matches []TextMatch
+
+	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+	for _, line := range lines {
+		if line == "" {
+			continue
+		}
+
+		var match ripgrepMatch
+		if err := json.Unmarshal([]byte(line), &match); err != nil {
+			continue
+		}
+		if match.Type != "match" {
+			continue
+		}
+
+		matches = append(matches, TextMatch{
+			Path:   match.Data.Path.Text,
+			Line:   match.Data.LineNumber,
+			Offset: match.Data.AbsoluteOffset,
+			Text:   strings.TrimRight(match.Data.Lines.Text, "\n"),
+		})
+	}
+
+	return matches
 }
 
 func parseRipgrepOutput(output []byte, contextLines int) (string, error) {
