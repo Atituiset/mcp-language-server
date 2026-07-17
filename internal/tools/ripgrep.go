@@ -63,18 +63,20 @@ func SearchCode(ctx context.Context, workspaceDir, pattern string, opts RipgrepO
 }
 
 type ripgrepMatch struct {
-	Type     string `json:"type"`
-	Path     struct {
-		Text string `json:"text"`
-	} `json:"path"`
-	Lines struct {
-		Text string `json:"text"`
-	} `json:"lines"`
-	LineNumber int `json:"line_number"`
-	Submatches []struct {
-		Start int `json:"start"`
-		End   int `json:"end"`
-	} `json:"submatches"`
+	Type string `json:"type"`
+	Data struct {
+		Path struct {
+			Text string `json:"text"`
+		} `json:"path"`
+		Lines struct {
+			Text string `json:"text"`
+		} `json:"lines"`
+		LineNumber int `json:"line_number"`
+		Submatches []struct {
+			Start int `json:"start"`
+			End   int `json:"end"`
+		} `json:"submatches"`
+	} `json:"data"`
 }
 
 func parseRipgrepOutput(output []byte, contextLines int) (string, error) {
@@ -94,18 +96,18 @@ func parseRipgrepOutput(output []byte, contextLines int) (string, error) {
 		}
 
 		if match.Type == "match" {
-			if match.Path.Text != currentFile {
+			if match.Data.Path.Text != currentFile {
 				if currentFile != "" {
 					result.WriteString("\n")
 				}
-				result.WriteString(fmt.Sprintf("=== %s ===\n", match.Path.Text))
-				currentFile = match.Path.Text
+				result.WriteString(fmt.Sprintf("=== %s ===\n", match.Data.Path.Text))
+				currentFile = match.Data.Path.Text
 				fileMatchCount = 0
 			}
 
 			fileMatchCount++
-			lineNum := match.LineNumber
-			lineText := strings.TrimRight(match.Lines.Text, "\n")
+			lineNum := match.Data.LineNumber
+			lineText := strings.TrimRight(match.Data.Lines.Text, "\n")
 
 			// Format with line number
 			result.WriteString(fmt.Sprintf("%d: %s\n", lineNum, lineText))
@@ -115,10 +117,9 @@ func parseRipgrepOutput(output []byte, contextLines int) (string, error) {
 				// Context lines are included in the ripgrep -C output as separate "context" type entries
 				// For simplicity, we just show the match line here
 			}
-		} else if match.Type == "context" || match.Type == "begin" || match.Type == "end" {
-			// Context lines from -C flag
-			lineNum := match.LineNumber
-			lineText := strings.TrimRight(match.Lines.Text, "\n")
+		} else if match.Type == "context" && contextLines > 0 {
+			lineNum := match.Data.LineNumber
+			lineText := strings.TrimRight(match.Data.Lines.Text, "\n")
 			result.WriteString(fmt.Sprintf("%d: %s\n", lineNum, lineText))
 		}
 	}
