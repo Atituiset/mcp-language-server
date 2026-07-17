@@ -201,9 +201,9 @@ LLM 看到该标记即知道结果无语义保证，必要时改用 `strategy=te
 
 | 项 | 修改 | 文件 |
 |----|------|------|
-| B8 | searchText 参数透传：`SearchOptions` 增加 maxCount/contextLines/caseSensitive 等并透传到 `RipgrepOptions`（§2 P1-2） | `router.go:112-123` + `SearchOptions` |
-| B9 | 缓存 TTL 可调：main.go 改用 `NewRouterWithCache` 通路或给 `NewRouterWithClient` 加 TTL 参数，经环境变量/flag 暴露（§2 P2-3） | `main.go:113`、`router.go:45-58` |
-| B10 | 文件变更缓存失效精细化：全量 Clear → 按文件维度失效（§2 P2-2）。大仓上避免一次保存清空全部缓存 | `main.go:114-116`、`internal/tools/cache/cache.go` |
+| B8 | searchText 参数透传：`SearchOptions` 增加 maxCount/contextLines/caseSensitive/wholeWord 并透传到 `RipgrepOptions`；`search` 工具 schema 同步增加 4 个 text 专用参数（§2 P1-2） | `router.go` `SearchOptions`/`searchText` + `tools.go` search schema |
+| B9 | 缓存 TTL 可调：`NewRouterWithClient` 增加可选 TTL 参数，main.go 经环境变量 `MCP_LS_CACHE_TTL`（秒）暴露（§2 P2-3） | `main.go`、`router.go` `NewRouterWithClient` |
+| B10 | ~~文件变更缓存失效精细化~~ **暂缓**：watcher 已有 300ms 防抖（`internal/watcher/interfaces.go:46`），但缓存键不含文件依赖信息，正确的按文件失效需要记录"结果→文件"依赖图，属架构级改动。当前全量 Clear 在防抖后有界，记为 backlog | — |
 
 ---
 

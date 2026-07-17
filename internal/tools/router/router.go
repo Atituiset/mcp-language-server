@@ -25,6 +25,12 @@ type SearchOptions struct {
 	Intent   string
 	FilePath string
 	Language string
+
+	// Text strategy (ripgrep) options; zero values fall back to defaults.
+	MaxCount      int
+	ContextLines  int
+	CaseSensitive bool
+	WholeWord     bool
 }
 
 type SearchResult struct {
@@ -49,11 +55,15 @@ func NewRouterWithCache(workspaceDir string, cacheTTLSeconds int64) *Router {
 	}
 }
 
-func NewRouterWithClient(workspaceDir string, client *lsp.Client) *Router {
+func NewRouterWithClient(workspaceDir string, client *lsp.Client, cacheTTLSeconds ...int64) *Router {
+	ttl := int64(defaultCacheTTL)
+	if len(cacheTTLSeconds) > 0 && cacheTTLSeconds[0] > 0 {
+		ttl = cacheTTLSeconds[0]
+	}
 	return &Router{
 		workspaceDir: workspaceDir,
 		lspClient:    client,
-		cache:        cache.NewSearchResultCache(time.Duration(defaultCacheTTL) * time.Second),
+		cache:        cache.NewSearchResultCache(time.Duration(ttl) * time.Second),
 	}
 }
 
@@ -121,7 +131,13 @@ func (r *Router) CacheSize() int {
 
 func (r *Router) searchText(ctx context.Context, opts SearchOptions) ([]SearchResult, error) {
 	rgOpts := tools.RipgrepOptions{
-		MaxCount: 100,
+		MaxCount:      opts.MaxCount,
+		ContextLines:  opts.ContextLines,
+		CaseSensitive: opts.CaseSensitive,
+		WholeWord:     opts.WholeWord,
+	}
+	if rgOpts.MaxCount <= 0 {
+		rgOpts.MaxCount = 100
 	}
 	result, err := tools.SearchCode(ctx, r.workspaceDir, opts.Query, rgOpts)
 	if err != nil {

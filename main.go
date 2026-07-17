@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -110,7 +111,12 @@ func (s *mcpServer) start() error {
 		return err
 	}
 
-	s.searchRouter = router.NewRouterWithClient(s.config.workspaceDir, s.lspClient)
+	var cacheTTL []int64
+	if v, err := strconv.Atoi(os.Getenv("MCP_LS_CACHE_TTL")); err == nil && v > 0 {
+		cacheTTL = append(cacheTTL, int64(v))
+		coreLogger.Info("Using search cache TTL: %ds", v)
+	}
+	s.searchRouter = router.NewRouterWithClient(s.config.workspaceDir, s.lspClient, cacheTTL...)
 	s.workspaceWatcher.OnFileChange = func() {
 		s.searchRouter.ClearCache()
 	}

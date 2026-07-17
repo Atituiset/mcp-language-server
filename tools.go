@@ -543,6 +543,18 @@ func (s *mcpServer) registerTools() error {
 		mcp.WithString("language",
 			mcp.Description("Language for AST search: 'c' or 'cpp' (default: auto-detect)"),
 		),
+		mcp.WithNumber("maxCount",
+			mcp.Description("Text strategy only: maximum matches per file (default: 100)"),
+		),
+		mcp.WithNumber("contextLines",
+			mcp.Description("Text strategy only: context lines around matches (default: 0)"),
+		),
+		mcp.WithBoolean("caseSensitive",
+			mcp.Description("Text strategy only: case sensitive search (default: false)"),
+		),
+		mcp.WithBoolean("wholeWord",
+			mcp.Description("Text strategy only: match whole words only (default: false)"),
+		),
 	)
 
 	s.mcpServer.AddTool(searchTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -567,6 +579,18 @@ func (s *mcpServer) registerTools() error {
 		}
 		if v, ok := args["language"].(string); ok {
 			opts.Language = v
+		}
+		if v, ok := readIntArgument(args, "maxCount"); ok {
+			opts.MaxCount = v
+		}
+		if v, ok := readIntArgument(args, "contextLines"); ok {
+			opts.ContextLines = v
+		}
+		if v, ok := args["caseSensitive"].(bool); ok {
+			opts.CaseSensitive = v
+		}
+		if v, ok := args["wholeWord"].(bool); ok {
+			opts.WholeWord = v
 		}
 
 		coreLogger.Debug("Executing unified search: query=%s strategy=%s intent=%s", query, opts.Strategy, opts.Intent)
