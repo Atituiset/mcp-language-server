@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
@@ -106,10 +107,43 @@ func (s *mcpServer) initializeLSP() error {
 	return client.WaitForServerReady(s.ctx)
 }
 
+// warmUpLSP nudges language servers that only start background indexing
+// after the first textDocument/didOpen (e.g. clangd, see
+// docs/benchmark-2026-07-17.md). It opens the first translation unit from
+// compile_commands.json when one exists; otherwise it is a no-op.
+func (s *mcpServer) warmUpLSP() {
+	data, err := os.ReadFile(filepath.Join(s.config.workspaceDir, "compile_commands.json"))
+	if err != nil {
+		return
+	}
+	var entries []struct {
+		File      string `json:"file"`
+		Directory string `json:"directory"`
+	}
+	if err := json.Unmarshal(data, &entries); err != nil || len(entries) == 0 {
+		return
+	}
+
+	file := entries[0].File
+	if !filepath.IsAbs(file) && entries[0].Directory != "" {
+		file = filepath.Join(entries[0].Directory, file)
+	}
+
+	ctx, cancel := context.WithTimeout(s.ctx, 30*time.Second)
+	defer cancel()
+	if err := s.lspClient.OpenFile(ctx, file); err != nil {
+		coreLogger.Debug("LSP warmup: failed to open %s: %v", file, err)
+		return
+	}
+	coreLogger.Info("LSP warmup: opened %s to trigger background indexing", file)
+}
+
 func (s *mcpServer) start() error {
 	if err := s.initializeLSP(); err != nil {
 		return err
 	}
+
+	s.warmUpLSP()
 
 	var cacheTTL []int64
 	if v, err := strconv.Atoi(os.Getenv("MCP_LS_CACHE_TTL")); err == nil && v > 0 {

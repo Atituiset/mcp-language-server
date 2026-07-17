@@ -297,6 +297,10 @@ func trimFileURI(uri string) string {
 	return documentURI.Path()
 }
 
+// maxCallHierarchyBytes caps the formatted call hierarchy output to keep
+// hot-function results (hundreds of callers at depth 3) bounded.
+const maxCallHierarchyBytes = 16 * 1024
+
 // formatCallResultsWithDepth 格式化调用结果，按深度分组输出
 //
 // 参数:
@@ -304,7 +308,7 @@ func trimFileURI(uri string) string {
 //   - title: 标题（如 "Callers" 或 "Callees"）
 //   - maxDepth: 最大深度
 //
-// 返回: 格式化的字符串
+// 返回: 格式化的字符串；超过 maxCallHierarchyBytes 时截断并标注省略数量
 func formatCallResultsWithDepth(results []CallResult, title string, maxDepth int) string {
 	var b strings.Builder
 	b.WriteString(fmt.Sprintf("=== %s (depth 1-%d, %d total) ===\n\n", title, maxDepth, len(results)))
@@ -316,14 +320,23 @@ func formatCallResultsWithDepth(results []CallResult, title string, maxDepth int
 	}
 
 	// 输出每个深度的结果
+	omitted := 0
 	for d := 1; d <= maxDepth; d++ {
 		if group, ok := depthGroups[d]; ok {
 			b.WriteString(fmt.Sprintf("--- Depth %d (%d functions) ---\n", d, len(group)))
 			for _, r := range group {
+				if b.Len() >= maxCallHierarchyBytes {
+					omitted++
+					continue
+				}
 				b.WriteString(fmt.Sprintf("  %s at %s:L%d:C%d\n", r.Name, r.FilePath, r.Line, r.Column))
 			}
 			b.WriteString("\n")
 		}
+	}
+
+	if omitted > 0 {
+		b.WriteString(fmt.Sprintf("... [truncated, %d more results, use lower depth or a narrower starting function]\n", omitted))
 	}
 
 	return b.String()
