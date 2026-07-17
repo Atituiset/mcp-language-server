@@ -61,6 +61,54 @@ func TestSearchAllNoResults(t *testing.T) {
 	}
 }
 
+func TestSearchSymbolFallbackScopedByIncludeMap(t *testing.T) {
+	dir := t.TempDir()
+
+	// board_a files share a discriminating include dir (-IboardA);
+	// board_b has its own unrelated include dir.
+	cc := `[
+  {"directory": "` + dir + `", "file": "` + filepath.Join(dir, "board_a/x.c") + `", "command": "gcc -Iinc -IboardA -c board_a/x.c"},
+  {"directory": "` + dir + `", "file": "` + filepath.Join(dir, "board_a/x2.c") + `", "command": "gcc -Iinc -IboardA -c board_a/x2.c"},
+  {"directory": "` + dir + `", "file": "` + filepath.Join(dir, "board_b/y.c") + `", "command": "gcc -IboardB -c board_b/y.c"}
+]`
+	if err := os.WriteFile(filepath.Join(dir, "compile_commands.json"), []byte(cc), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range []string{"board_a/x.c", "board_a/x2.c", "board_b/y.c"} {
+		p := filepath.Join(dir, f)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte("int secret_token;\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	r := NewRouter(dir) // no LSP client: symbol layer must fall back
+	results, err := r.Search(context.Background(), SearchOptions{
+		Query:    "secret_token",
+		Strategy: "symbol",
+		FilePath: filepath.Join(dir, "board_a", "x.c"),
+	})
+	if err != nil {
+		t.Fatalf("search failed: %v", err)
+	}
+	if len(results) != 1 || results[0].Layer != "symbol-fallback-text" {
+		t.Fatalf("expected symbol-fallback-text layer, got %+v", results)
+	}
+
+	content := results[0].Content
+	if !strings.Contains(content, "(scoped to 2 files via include map)") {
+		t.Errorf("expected include-map scope note, got:\n%s", content)
+	}
+	if !strings.Contains(content, "board_a/x.c") || !strings.Contains(content, "board_a/x2.c") {
+		t.Errorf("expected hits in both board_a files, got:\n%s", content)
+	}
+	if strings.Contains(content, "board_b") {
+		t.Errorf("out-of-neighborhood file leaked into scoped results:\n%s", content)
+	}
+}
+
 func TestByteOffsetOfLine(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "f.c")

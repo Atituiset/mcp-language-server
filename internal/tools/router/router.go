@@ -21,6 +21,8 @@ type Router struct {
 	workspaceDir string
 	lspClient    *lsp.Client
 	cache        *cache.SearchResultCache
+	includeOnce  sync.Once
+	includeMap   *tools.IncludeMap
 }
 
 type SearchOptions struct {
@@ -129,6 +131,32 @@ func (r *Router) ClearCache() {
 	}
 }
 
+// getIncludeMap lazily loads the compile_commands.json include mapping.
+func (r *Router) getIncludeMap() *tools.IncludeMap {
+	r.includeOnce.Do(func() {
+		if m, err := tools.LoadIncludeMap(r.workspaceDir); err == nil && m.Size() > 0 {
+			r.includeMap = m
+		}
+	})
+	return r.includeMap
+}
+
+// scopedRipgrepOptions narrows a ripgrep invocation to the include
+// neighborhood of opts.FilePath when the include map knows the file.
+// It returns the (possibly scoped) options and the scope size (0 = unscoped).
+func (r *Router) scopedRipgrepOptions(opts SearchOptions, base tools.RipgrepOptions) (tools.RipgrepOptions, int) {
+	if m := r.getIncludeMap(); m != nil && opts.FilePath != "" {
+		if nb := m.Neighborhood(opts.FilePath); len(nb) > 0 {
+			if len(nb) > maxScopeFiles {
+				nb = nb[:maxScopeFiles]
+			}
+			base.Files = nb
+			return base, len(nb)
+		}
+	}
+	return base, 0
+}
+
 func (r *Router) CacheSize() int {
 	if r.cache != nil {
 		return r.cache.Size()
@@ -161,6 +189,28 @@ func (r *Router) searchAST(ctx context.Context, opts SearchOptions) ([]SearchRes
 		language = "cpp"
 	}
 
+	// When anchored on a file, expand the query to its include neighborhood
+	// (bounded) so macro-gated code near the anchor is covered.
+	if opts.FilePath != "" {
+		if m := r.getIncludeMap(); m != nil {
+			if nb := m.Neighborhood(opts.FilePath); len(nb) > 0 {
+				if len(nb) > maxASTScopeFiles {
+					nb = nb[:maxASTScopeFiles]
+				}
+				var all []treesitter.QueryResult
+				for _, f := range nb {
+					if res, err := tools.RunTreesitterQueryResults(ctx, r.workspaceDir, opts.Query, f, language); err == nil {
+						all = append(all, res...)
+					}
+				}
+				content := fmt.Sprintf("NOTE: expanded to %d files via include map\n%s", len(nb), tools.FormatQueryResults(all))
+				return []SearchResult{
+					{Layer: "ast", Content: content, Count: len(all)},
+				}, nil
+			}
+		}
+	}
+
 	result, err := tools.RunTreesitterQuery(ctx, r.workspaceDir, opts.Query, opts.FilePath, language)
 	if err != nil {
 		return nil, err
@@ -184,15 +234,19 @@ func (r *Router) searchSymbol(ctx context.Context, opts SearchOptions) ([]Search
 		}
 	}
 
-	rgOpts := tools.RipgrepOptions{
+	rgOpts, scoped := r.scopedRipgrepOptions(opts, tools.RipgrepOptions{
 		MaxCount:      100,
 		CaseSensitive: true,
-	}
+	})
 	result, err := tools.SearchCode(ctx, r.workspaceDir, opts.Query, rgOpts)
 	if err != nil {
 		return nil, err
 	}
-	content := "WARNING: LSP unavailable, results are plain text matches\n" + result
+	content := "WARNING: LSP unavailable, results are plain text matches"
+	if scoped > 0 {
+		content += fmt.Sprintf(" (scoped to %d files via include map)", scoped)
+	}
+	content += "\n" + result
 	return []SearchResult{
 		{Layer: "symbol-fallback-text", Content: content, Count: countLines(result)},
 	}, nil
@@ -218,6 +272,13 @@ func (r *Router) searchAuto(ctx context.Context, opts SearchOptions) ([]SearchRe
 // (docs/code-atom-ir.md §4). Rendered overhead (file headers, per-atom
 // tags) adds ~25%, so 8KB of payload stays well under the 12KB total cap.
 const unifiedBudgetBytes = 8 * 1024
+
+const (
+	// maxScopeFiles caps include-map-scoped ripgrep fallbacks.
+	maxScopeFiles = 400
+	// maxASTScopeFiles caps include-map-expanded tree-sitter queries.
+	maxASTScopeFiles = 20
+)
 
 // searchAll fans out to all three layers, then normalizes the heterogeneous
 // results into CodeAtoms and applies merge/dedup/budget-crop
@@ -289,16 +350,19 @@ func (r *Router) searchAll(ctx context.Context, opts SearchOptions) ([]SearchRes
 	fileCache := map[string][]byte{}
 	atoms = append(atoms, atomsFromSymbols(symbols, fileCache)...)
 
+	fallbackScoped := 0
 	if symbolFallback {
-		fbMatches, err := tools.SearchCodeMatches(ctx, r.workspaceDir, opts.Query, tools.RipgrepOptions{
+		fbOpts, fbScoped := r.scopedRipgrepOptions(opts, tools.RipgrepOptions{
 			MaxCount:      100,
 			CaseSensitive: true,
 		})
+		fbMatches, err := tools.SearchCodeMatches(ctx, r.workspaceDir, opts.Query, fbOpts)
 		if err != nil {
 			errors = append(errors, err)
 		} else {
 			atoms = append(atoms, atomsFromTextMatches(fbMatches, "rg(lsp-fallback)")...)
 		}
+		fallbackScoped = fbScoped
 	}
 
 	if len(atoms) == 0 {
@@ -314,7 +378,11 @@ func (r *Router) searchAll(ctx context.Context, opts SearchOptions) ([]SearchRes
 
 	content := atom.Render(kept, stats)
 	if symbolFallback {
-		content = "WARNING: LSP unavailable, results are plain text matches\n" + content
+		warning := "WARNING: LSP unavailable, results are plain text matches"
+		if fallbackScoped > 0 {
+			warning += fmt.Sprintf(" (scoped to %d files via include map)", fallbackScoped)
+		}
+		content = warning + "\n" + content
 	}
 
 	return []SearchResult{{Layer: "unified", Content: content, Count: stats.Total - stats.Dropped}}, nil

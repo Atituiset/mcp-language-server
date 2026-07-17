@@ -78,3 +78,4 @@
 - ripgrep JSON `data` 包裹层解析修复（`b4d886f`）
 - LSP 启动 warmup（clangd didOpen 触发索引）、callers/callees 16KB 截断（`4d274fb`）
 - CodeAtom IR Phase 1：归一化/吞并/去重/四相预算（`282e7b9`）
+- **include 映射降级**：compile_commands.json → IncludeMap（含全局目录无区分度过滤）；symbol 降级 rg 按 include 邻域限定（≤400 文件）；ast 层锚定 filePath 时邻域扩展（≤20 文件）——本 commit

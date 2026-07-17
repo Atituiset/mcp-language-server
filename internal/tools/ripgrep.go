@@ -18,6 +18,9 @@ type RipgrepOptions struct {
 	ContextLines  int
 	FileType      string
 	Include       string
+	// Files, when non-empty, restricts the search to these explicit paths
+	// instead of the whole workspace directory.
+	Files []string
 }
 
 // SearchCode performs a ripgrep search in the given workspace directory
@@ -69,7 +72,12 @@ func runRipgrep(ctx context.Context, workspaceDir, pattern string, opts RipgrepO
 		args = append(args, "--glob", opts.Include)
 	}
 
-	args = append(args, pattern, ".")
+	if len(opts.Files) > 0 {
+		args = append(args, pattern)
+		args = append(args, opts.Files...)
+	} else {
+		args = append(args, pattern, ".")
+	}
 
 	cmd := exec.Command("rg", args...)
 	cmd.Dir = workspaceDir

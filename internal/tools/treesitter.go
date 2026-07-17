@@ -76,6 +76,11 @@ func RunTreesitterQuery(ctx context.Context, workspaceDir, query, filePath, lang
 		return "No matches found", nil
 	}
 
+	return FormatQueryResults(results), nil
+}
+
+// FormatQueryResults formats tree-sitter query results for display.
+func FormatQueryResults(results []treesitter.QueryResult) string {
 	var b strings.Builder
 	b.WriteString(fmt.Sprintf("Found %d matches:\n\n", len(results)))
 
@@ -88,7 +93,7 @@ func RunTreesitterQuery(ctx context.Context, workspaceDir, query, filePath, lang
 		b.WriteString(fmt.Sprintf("  [%s] %s (L%d:C%d)\n", r.Capture, truncateStr(r.Content, 60), r.Line, r.Column))
 	}
 
-	return b.String(), nil
+	return b.String()
 }
 
 // GetAST 获取文件的 AST 结构
