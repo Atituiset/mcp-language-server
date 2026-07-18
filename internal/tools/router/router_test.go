@@ -109,6 +109,66 @@ func TestSearchSymbolFallbackScopedByIncludeMap(t *testing.T) {
 	}
 }
 
+func TestSearchTextScopedByFilePath(t *testing.T) {
+	dir := t.TempDir()
+
+	// same layout as the fallback test: board_a pair shares -IboardA,
+	// board_b stands alone.
+	cc := `[
+  {"directory": "` + dir + `", "file": "` + filepath.Join(dir, "board_a/x.c") + `", "command": "gcc -Iinc -IboardA -c board_a/x.c"},
+  {"directory": "` + dir + `", "file": "` + filepath.Join(dir, "board_a/x2.c") + `", "command": "gcc -Iinc -IboardA -c board_a/x2.c"},
+  {"directory": "` + dir + `", "file": "` + filepath.Join(dir, "board_b/y.c") + `", "command": "gcc -IboardB -c board_b/y.c"}
+]`
+	if err := os.WriteFile(filepath.Join(dir, "compile_commands.json"), []byte(cc), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range []string{"board_a/x.c", "board_a/x2.c", "board_b/y.c"} {
+		p := filepath.Join(dir, f)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte("int secret_token;\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	r := NewRouter(dir)
+
+	// anchored on a file with a discriminating neighborhood
+	results, err := r.Search(context.Background(), SearchOptions{
+		Query:    "secret_token",
+		Strategy: "text",
+		FilePath: filepath.Join(dir, "board_a", "x.c"),
+	})
+	if err != nil {
+		t.Fatalf("search failed: %v", err)
+	}
+	content := results[0].Content
+	if !strings.Contains(content, "board_a/x.c") || !strings.Contains(content, "board_a/x2.c") {
+		t.Errorf("expected hits in both board_a files, got:\n%s", content)
+	}
+	if strings.Contains(content, "board_b") {
+		t.Errorf("out-of-neighborhood file leaked into text results:\n%s", content)
+	}
+
+	// anchored on a file without one: falls back to the file itself
+	results, err = r.Search(context.Background(), SearchOptions{
+		Query:    "secret_token",
+		Strategy: "text",
+		FilePath: filepath.Join(dir, "board_b", "y.c"),
+	})
+	if err != nil {
+		t.Fatalf("search failed: %v", err)
+	}
+	content = results[0].Content
+	if !strings.Contains(content, "board_b/y.c") {
+		t.Errorf("expected hit in the anchor file itself, got:\n%s", content)
+	}
+	if strings.Contains(content, "board_a") {
+		t.Errorf("unanchored file leaked into single-file results:\n%s", content)
+	}
+}
+
 func TestByteOffsetOfLine(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "f.c")

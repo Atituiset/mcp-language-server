@@ -538,7 +538,7 @@ func (s *mcpServer) registerTools() error {
 			mcp.Description("Hint about what you're looking for: 'todo', 'function', 'struct', 'definition', 'reference', 'type', etc. Helps auto-routing."),
 		),
 		mcp.WithString("filePath",
-			mcp.Description("Limit search to a specific file"),
+			mcp.Description("Anchor the search on a file: text layer searches its include neighborhood (from compile_commands.json) or the file itself; AST layer limits to it"),
 		),
 		mcp.WithString("language",
 			mcp.Description("Language for AST search: 'c' or 'cpp' (default: auto-detect)"),

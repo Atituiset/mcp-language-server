@@ -157,6 +157,20 @@ func (r *Router) scopedRipgrepOptions(opts SearchOptions, base tools.RipgrepOpti
 	return base, 0
 }
 
+// textRipgrepOptions resolves the file scope for text searches: with an
+// anchor filePath, the include map decides where to search — the file's
+// include neighborhood when it discriminates, the file itself otherwise.
+func (r *Router) textRipgrepOptions(opts SearchOptions, base tools.RipgrepOptions) (tools.RipgrepOptions, int) {
+	if opts.FilePath == "" {
+		return base, 0
+	}
+	if scoped, n := r.scopedRipgrepOptions(opts, base); n > 0 {
+		return scoped, n
+	}
+	base.Files = []string{opts.FilePath}
+	return base, 1
+}
+
 func (r *Router) CacheSize() int {
 	if r.cache != nil {
 		return r.cache.Size()
@@ -165,18 +179,21 @@ func (r *Router) CacheSize() int {
 }
 
 func (r *Router) searchText(ctx context.Context, opts SearchOptions) ([]SearchResult, error) {
-	rgOpts := tools.RipgrepOptions{
+	rgOpts, scoped := r.textRipgrepOptions(opts, tools.RipgrepOptions{
 		MaxCount:      opts.MaxCount,
 		ContextLines:  opts.ContextLines,
 		CaseSensitive: opts.CaseSensitive,
 		WholeWord:     opts.WholeWord,
-	}
+	})
 	if rgOpts.MaxCount <= 0 {
 		rgOpts.MaxCount = 100
 	}
 	result, err := tools.SearchCode(ctx, r.workspaceDir, opts.Query, rgOpts)
 	if err != nil {
 		return nil, err
+	}
+	if scoped > 0 {
+		result = fmt.Sprintf("NOTE: scoped to %d file(s) via include map\n%s", scoped, result)
 	}
 	return []SearchResult{
 		{Layer: "text", Content: result, Count: countLines(result)},
@@ -296,12 +313,12 @@ func (r *Router) searchAll(ctx context.Context, opts SearchOptions) ([]SearchRes
 	wg.Add(3)
 	go func() {
 		defer wg.Done()
-		rgOpts := tools.RipgrepOptions{
+		rgOpts, _ := r.textRipgrepOptions(opts, tools.RipgrepOptions{
 			MaxCount:      opts.MaxCount,
 			ContextLines:  opts.ContextLines,
 			CaseSensitive: opts.CaseSensitive,
 			WholeWord:     opts.WholeWord,
-		}
+		})
 		if rgOpts.MaxCount <= 0 {
 			rgOpts.MaxCount = 100
 		}

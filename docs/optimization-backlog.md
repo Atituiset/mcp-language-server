@@ -7,9 +7,8 @@
 
 ## P1 正确性与一致性（建议先做）
 
-### 1. text 层忽略 filePath 参数
-- **问题**：`search` 工具声明了 `filePath` 窄化范围，但 `router.searchText` 调 `tools.SearchCode` 时始终全仓搜索（`internal/tools/router/router.go`）。截断提示语还让 LLM "use strategy=text with filePath to narrow"——实际无效。
-- **修法**：`RipgrepOptions` 增加路径限定（rg 支持以文件/目录为目标），或复用 `Include` glob。同步改 `SearchCodeMatches`（unified 管道同样受影响）。
+### 1. ~~text 层忽略 filePath 参数~~ ✅ 已完成（本 commit）
+- 已修：text 层带锚点时按 include 邻域（可区分时）或文件本身限定搜索（`textRipgrepOptions`），unified 管道的 text 生产者同步生效；输出带 `NOTE: scoped to N file(s) via include map`。
 
 ### 2. intent 路由路径接入归一化
 - **问题**：auto+intent 命中后走单层原样输出（仅 50 行/4KB 截断），不享受 Phase 1 的 merge/dedup/budget。同一 `search` 入口，两种输出语义不一致。
