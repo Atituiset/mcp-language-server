@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -288,6 +289,7 @@ func (r *Router) searchAuto(ctx context.Context, opts SearchOptions) ([]SearchRe
 func (r *Router) searchLayerUnified(ctx context.Context, opts SearchOptions, layer string) ([]SearchResult, error) {
 	var atoms []atom.CodeAtom
 	warning := ""
+	exp := newSnippetExpander(r.workspaceDir)
 
 	switch layer {
 	case "text":
@@ -304,7 +306,7 @@ func (r *Router) searchLayerUnified(ctx context.Context, opts SearchOptions, lay
 		if err != nil {
 			return nil, err
 		}
-		atoms = atomsFromTextMatches(matches, "rg")
+		atoms = atomsFromTextMatches(matches, "rg", exp)
 	case "ast":
 		language := opts.Language
 		if language == "" {
@@ -330,7 +332,7 @@ func (r *Router) searchLayerUnified(ctx context.Context, opts SearchOptions, lay
 			if fbErr != nil {
 				return nil, fbErr
 			}
-			atoms = append(atoms, atomsFromTextMatches(fbMatches, "rg(lsp-fallback)")...)
+			atoms = append(atoms, atomsFromTextMatches(fbMatches, "rg(lsp-fallback)", exp)...)
 			warning = "WARNING: LSP unavailable, results are plain text matches"
 			if scoped > 0 {
 				warning += fmt.Sprintf(" (scoped to %d files via include map)", scoped)
@@ -410,9 +412,10 @@ func (r *Router) searchAll(ctx context.Context, opts SearchOptions) ([]SearchRes
 		res, err := tools.RunTreesitterQueryResults(ctx, r.workspaceDir, opts.Query, opts.FilePath, language)
 		mu.Lock()
 		defer mu.Unlock()
-		if err != nil {
-			errors = append(errors, err)
-		} else {
+		// A query that is not a valid CSP pattern is still a valid text/symbol
+		// query — treat any AST-layer failure as "no contribution", matching
+		// the pre-fail-fast behavior. Explicit strategy=ast surfaces the error.
+		if err == nil {
 			astResults = res
 		}
 	}()
@@ -431,8 +434,9 @@ func (r *Router) searchAll(ctx context.Context, opts SearchOptions) ([]SearchRes
 	wg.Wait()
 
 	// Normalize sequentially (file reads for byte-offset conversion are cached).
+	exp := newSnippetExpander(r.workspaceDir)
 	var atoms []atom.CodeAtom
-	atoms = append(atoms, atomsFromTextMatches(textMatches, "rg")...)
+	atoms = append(atoms, atomsFromTextMatches(textMatches, "rg", exp)...)
 	atoms = append(atoms, atomsFromTreeSitter(astResults)...)
 	fileCache := map[string][]byte{}
 	atoms = append(atoms, atomsFromSymbols(symbols, fileCache)...)
@@ -447,7 +451,7 @@ func (r *Router) searchAll(ctx context.Context, opts SearchOptions) ([]SearchRes
 		if err != nil {
 			errors = append(errors, err)
 		} else {
-			atoms = append(atoms, atomsFromTextMatches(fbMatches, "rg(lsp-fallback)")...)
+			atoms = append(atoms, atomsFromTextMatches(fbMatches, "rg(lsp-fallback)", exp)...)
 		}
 		fallbackScoped = fbScoped
 	}
@@ -495,13 +499,76 @@ func (r *Router) querySymbols(ctx context.Context, query string) ([]protocol.Wor
 	return nil, true, nil
 }
 
+// contextRadius is the number of lines a snippet atom extends around the
+// rg hit (docs/code-atom-ir.md §1: 按匹配行上下扩展 2 行).
+const contextRadius = 2
+
+// snippetExpander expands rg hits to ±contextRadius lines, caching file
+// contents and line-offset tables per file.
+type snippetExpander struct {
+	dir   string
+	cache map[string]*fileLines // nil entry = unreadable file
+}
+
+type fileLines struct {
+	content []byte
+	offsets []int // start offset of each 1-indexed line
+}
+
+func newSnippetExpander(dir string) *snippetExpander {
+	return &snippetExpander{dir: dir, cache: map[string]*fileLines{}}
+}
+
+func (e *snippetExpander) load(path string) *fileLines {
+	if fl, ok := e.cache[path]; ok {
+		return fl
+	}
+	data, err := os.ReadFile(filepath.Join(e.dir, path))
+	if err != nil {
+		e.cache[path] = nil
+		return nil
+	}
+	fl := &fileLines{content: data, offsets: []int{0}}
+	for i, b := range data {
+		if b == '\n' {
+			fl.offsets = append(fl.offsets, i+1)
+		}
+	}
+	e.cache[path] = fl
+	return fl
+}
+
+// expand widens a snippet atom to ±contextRadius lines around the 1-indexed
+// match line, adjusting its byte range accordingly.
+func (e *snippetExpander) expand(a *atom.CodeAtom, line int) {
+	fl := e.load(a.FilePath)
+	if fl == nil || line < 1 || line > len(fl.offsets) {
+		return
+	}
+	lo := line - 1 - contextRadius
+	if lo < 0 {
+		lo = 0
+	}
+	hi := line - 1 + contextRadius
+	if hi > len(fl.offsets)-1 {
+		hi = len(fl.offsets) - 1
+	}
+	end := len(fl.content)
+	if hi+1 < len(fl.offsets) {
+		end = fl.offsets[hi+1]
+	}
+	a.StartByte = fl.offsets[lo]
+	a.EndByte = end
+	a.FullContent = strings.TrimRight(string(fl.content[a.StartByte:a.EndByte]), "\n")
+}
+
 // atomsFromTextMatches normalizes ripgrep matches (docs §1: line-level plain
-// text, physical coordinates only, lowest priority).
-func atomsFromTextMatches(matches []tools.TextMatch, source string) []atom.CodeAtom {
+// text, expanded to ±contextRadius lines, lowest priority).
+func atomsFromTextMatches(matches []tools.TextMatch, source string, exp *snippetExpander) []atom.CodeAtom {
 	atoms := make([]atom.CodeAtom, 0, len(matches))
 	for _, m := range matches {
 		text := strings.TrimSpace(m.Text)
-		atoms = append(atoms, atom.CodeAtom{
+		a := atom.CodeAtom{
 			SemanticID:  fmt.Sprintf("%s:%d", m.Path, m.Offset),
 			Name:        truncateLine(text, 60),
 			Kind:        atom.KindSnippet,
@@ -513,7 +580,9 @@ func atomsFromTextMatches(matches []tools.TextMatch, source string) []atom.CodeA
 			Reference:   fmt.Sprintf("%s:%d: %s", m.Path, m.Line, truncateLine(text, 60)),
 			SourceTool:  source,
 			Priority:    1,
-		})
+		}
+		exp.expand(&a, m.Line)
+		atoms = append(atoms, a)
 	}
 	return atoms
 }

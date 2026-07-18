@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/isaacphi/mcp-language-server/internal/tools"
 )
 
 func TestSearchAllUnifiedPipeline(t *testing.T) {
@@ -197,6 +199,42 @@ func TestSearchTextScopedByFilePath(t *testing.T) {
 	}
 	if strings.Contains(content, "board_a") {
 		t.Errorf("unanchored file leaked into single-file results:\n%s", content)
+	}
+}
+
+func TestSnippetExpansion(t *testing.T) {
+	dir := t.TempDir()
+	content := "l1\nl2\nl3 TODO\nl4\nl5\nl6\nl7\n"
+	if err := os.WriteFile(filepath.Join(dir, "a.c"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	exp := newSnippetExpander(dir)
+	atoms := atomsFromTextMatches([]tools.TextMatch{
+		{Path: "a.c", Line: 3, Offset: 6, Text: "l3 TODO"},
+	}, "rg", exp)
+	if len(atoms) != 1 {
+		t.Fatalf("expected 1 atom, got %d", len(atoms))
+	}
+
+	a := atoms[0]
+	if a.FullContent != "l1\nl2\nl3 TODO\nl4\nl5" {
+		t.Errorf("unexpected expanded content:\n%s", a.FullContent)
+	}
+	if a.StartByte != 0 || a.EndByte != len("l1\nl2\nl3 TODO\nl4\nl5\n") {
+		t.Errorf("unexpected byte range: [%d,%d)", a.StartByte, a.EndByte)
+	}
+	// signature stays the bare match line for L1 degradation
+	if a.Signature != "l3 TODO" {
+		t.Errorf("unexpected signature: %q", a.Signature)
+	}
+
+	// clamping at file start
+	atoms = atomsFromTextMatches([]tools.TextMatch{
+		{Path: "a.c", Line: 1, Offset: 0, Text: "l1"},
+	}, "rg", exp)
+	if got := atoms[0].FullContent; got != "l1\nl2\nl3 TODO" {
+		t.Errorf("unexpected clamped content:\n%s", got)
 	}
 }
 

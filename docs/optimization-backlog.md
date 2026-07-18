@@ -31,8 +31,8 @@
 ### 6. symbol 原子 L0 载荷
 - **内容**：对 Top-N 高优先 symbol 原子按需发 `textDocument/definition` 抓实现体（限制 N 控延迟），当前 symbol 原子只有 L1/L2。
 
-### 7. rg 命中 ±2 行上下文扩展
-- **内容**：snippet 读文件按行扩展，提高文本命中可读性（文档 §1 原始设计）。
+### 7. ~~rg 命中 ±2 行上下文扩展~~ ✅ 已完成（本 commit）
+- 已修：snippet 原子按匹配行 ±2 行扩展（`snippetExpander`，带每文件行偏移缓存），相邻命中窗口经物理吞并自动合并；Signature 保持单行用于 L1 降级。实测 u-boot TODO：相邻 TODO 窗口合并后原子数 1683→1459，Kconfig 命中带完整 help 上下文。
 
 ### 8. 交错块 LCA 合并
 - **内容**：重叠（非包含）AST 块用 tree-sitter 找最近公共祖先合并，替代 Phase 1 的直接吞并。
@@ -44,9 +44,8 @@
 ### 10. B10 缓存按文件失效
 - **现状**：任意文件保存 → 全量 Clear（防抖 300ms 兜底）。atom 化后可行：缓存条目记录涉及的文件集合，失效时按文件反查。
 
-### 11. QueryDirectory 全仓 AST 解析性能
-- **问题**：ast 层在 u-boot 上遍历解析 13k+ 文件，无并发无缓存。自然语言 query 还会全部报错浪费一次全仓遍历。
-- **修法**：并发解析 worker pool + 按 mtime 的结果缓存；或在 query 明显非 CSP 模式时跳过 ast 层。
+### 11. ~~QueryDirectory 全仓 AST 解析性能~~ ✅ 已完成（本 commit）
+- 已修：worker pool 并发解析（每 worker 独立 parser + 查询只编译一次）+ 无效 CSP 模式预编译失败快速返回。实测 u-boot 全仓 13k 文件 struct_specifier 扫描 2.8s（19 万+ 命中）；无效模式 0.12s 报错（原行为：全仓慢扫一遍后静默返回空）。auto 融合路径对"非 CSP 查询"保持静默跳过（不污染统一结果）。
 
 ### 12. callers 压测对象修正
 - **问题**：srsRAN 基线选的 `handle_rrc_setup_request` 仅 1 个调用者（统一 dispatch 架构），压不出调用链体积。
