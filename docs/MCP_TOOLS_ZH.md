@@ -4,6 +4,8 @@
 
 MCP Language Server 通过 JSON-RPC 2.0 协议提供代码上下文提取能力，支持 L1（文本）、L2（AST）、L3（符号）三层搜索架构。
 
+> **工具面（2026-07 起）**：默认仅注册 **9 个工具**——`search`、`definition`、`references`、`callers`、`callees`、`diagnostics`、`hover`、`edit_file`、`rename_symbol`。其余 8 个（`search_text`、`search_ast`、`search_symbol`、`ripgrep`、`treesitter_query`、`treesitter_ast`、`find_struct_usage`、`find_struct_definition`）为 debug 工具，仅当环境变量 **`MCP_LS_DEBUG_TOOLS=1`** 时注册。本文档保留全部 17 个工具的参考，debug 工具在各节标题处有标注。
+
 ---
 
 ## 协议格式
@@ -63,16 +65,20 @@ Content-Length: <字节数>\r\n\r\n<JSON>
 
 ### 1. search - 统一搜索（推荐）
 
-智能路由的统一搜索入口，自动选择最佳搜索层。
+智能路由的统一搜索入口，自动选择最佳搜索层。**auto 模式下输出经过 CodeAtom 归一化管道**（异构结果合并 → 物理吞并 → 语义去重 → 预算降级裁剪），单块输出 ≤ 12KB。
 
 **参数**：
 | 参数 | 类型 | 必填 | 说明 |
 |------|------|------|------|
 | `query` | string | 是 | 搜索内容 |
 | `strategy` | string | 否 | 搜索策略：`auto`（默认）、`text`、`ast`、`symbol` |
-| `intent` | string | 否 | 意图提示：`todo`、`function`、`struct`、`definition`、`reference`、`type` |
-| `filePath` | string | 否 | 限制搜索到特定文件 |
+| `intent` | string | 否 | 意图提示：`todo`、`function`、`struct`、`definition`、`reference`、`type` 及中文（定义/引用/调用/结构体/函数/注释） |
+| `filePath` | string | 否 | 锚定到文件：text 层按其 include 邻域（来自 compile_commands.json）或文件本身限定，AST 层限定到该文件 |
 | `language` | string | 否 | 语言：`c` 或 `cpp`（仅用于 AST 搜索） |
+| `maxCount` | number | 否 | 仅 text 策略：每文件最大匹配数（默认 100） |
+| `contextLines` | number | 否 | 仅 text 策略：匹配上下文行数（默认 0） |
+| `caseSensitive` | boolean | 否 | 仅 text 策略：大小写敏感（默认 false） |
+| `wholeWord` | boolean | 否 | 仅 text 策略：全词匹配（默认 false） |
 
 **请求示例**：
 ```bash
@@ -80,16 +86,26 @@ REQ='{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search","ar
 echo -e "Content-Length: ${#REQ}\r\n\r\n$REQ" | ./mcp-language-server --workspace /path/to/project --lsp clangd
 ```
 
-**测试结果**：
+**输出示例（auto 无 intent，unified 归一化）**：
 ```
-=== [text layer] (13 results) ===
-=== [symbol layer] (13 results) ===
-=== [ast layer] (1 results) ===
+=== [unified layer] (N results) ===
+=== [unified] (1683 atoms, 85 shown: 85 full / 0 signature / 0 reference, 1598 dropped, 8.0KB of 8KB budget) ===
+
+=== ./path/to/file.c ===
+[rg|SNIPPET|L0] <匹配内容>
+... [N atoms dropped by budget, use strategy=text|ast|symbol with filePath to narrow]
 ```
+
+说明：
+- auto + intent → 单层归一化输出（层标 `unified-text`/`unified-ast`/`unified-symbol`）
+- 显式 `strategy=text|ast|symbol` → 原始单层格式（每层 ≤50 行/4KB 截断）
+- 符号层 LSP 不可用时会降级文本搜索并标注 `symbol-fallback-text` + WARNING；带 filePath 锚点时降级搜索按 include 邻域限定
 
 ---
 
-### 2. search_text - L1 文本搜索
+> ⚠️ **以下第 2–5 节为 debug 工具**：默认不注册，需 `MCP_LS_DEBUG_TOOLS=1` 启动后方可使用。日常请优先用 `search`（strategy 参数等价覆盖）。
+
+### 2. search_text - L1 文本搜索（debug）
 
 使用 ripgrep 进行快速文本搜索。
 
@@ -188,7 +204,8 @@ REQ='{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"ripgrep","a
 
 **测试结果**：
 ```
-0: 0: ...
+=== src/main.cpp ===
+12: int helperFunction() { return 42; }
 ```
 
 ---
@@ -246,7 +263,7 @@ No references found for symbol: helperFunction
 | `filePath` | string | 否 | 包含函数的文件路径；使用精确位置调用时必填，也可用于缩小 `symbolName` 解析范围 |
 | `line` | number | 否 | 行号（1-based）；使用精确位置调用时必填 |
 | `column` | number | 否 | 列号（1-based）；使用精确位置调用时必填 |
-| `depth` | number | 否 | 最大遍历深度（默认 1，最大 10） |
+| `depth` | number | 否 | 最大遍历深度（默认 1，最大 3） |
 
 **请求示例**：
 ```bash
@@ -276,7 +293,7 @@ No call hierarchy items found at this position
 | `filePath` | string | 否 | 包含函数的文件路径；使用精确位置调用时必填，也可用于缩小 `symbolName` 解析范围 |
 | `line` | number | 否 | 行号（1-based）；使用精确位置调用时必填 |
 | `column` | number | 否 | 列号（1-based）；使用精确位置调用时必填 |
-| `depth` | number | 否 | 最大遍历深度（默认 1，最大 10） |
+| `depth` | number | 否 | 最大遍历深度（默认 1，最大 3） |
 
 **请求示例**：
 ```bash
@@ -353,7 +370,7 @@ failed to rename symbol: failed to apply changes: ... (路径问题)
 | 参数 | 类型 | 必填 | 说明 |
 |------|------|------|------|
 | `filePath` | string | 是 | 文件路径 |
-| `contextLines` | boolean | 否 | 是否包含上下文行（默认 false） |
+| `contextLines` | number | 否 | 每条诊断包含的上下文行数（默认 5） |
 | `showLineNumbers` | boolean | 否 | 是否显示行号（默认 true） |
 
 **请求示例**：
@@ -397,7 +414,9 @@ Successfully applied text edits. 1 lines removed, 1 lines added.
 
 ---
 
-### 14. find_struct_definition - 查找结构体定义
+> ⚠️ **以下第 14–17 节为 debug 工具**（`MCP_LS_DEBUG_TOOLS=1` 时注册）。
+
+### 14. find_struct_definition - 查找结构体定义（debug）
 
 查找 C/C++ 结构体的定义位置。
 
@@ -496,17 +515,26 @@ REQ='{"jsonrpc":"2.0","id":17,"method":"tools/call","params":{"name":"treesitter
 
 | 层级 | 工具 | 速度 | 用途 |
 |------|------|------|------|
-| **L1** | `search_text`, `ripgrep` | 最快 | 文本/正则搜索、TODO、注释 |
-| **L2** | `search_ast`, `treesitter_query`, `find_struct_*` | 快 | AST 结构查询、CSP 模式 |
-| **L3** | `search_symbol`, `definition`, `references`, `callers`, `callees` | 较慢 | 语义理解、符号定义、调用层级 |
+| **L1** | `search_text`⚠️, `ripgrep`⚠️ | 最快 | 文本/正则搜索、TODO、注释 |
+| **L2** | `search_ast`⚠️, `treesitter_query`⚠️, `find_struct_*`⚠️ | 快 | AST 结构查询、CSP 模式 |
+| **L3** | `search_symbol`⚠️, `definition`, `references`, `callers`, `callees` | 较慢 | 语义理解、符号定义、调用层级 |
+
+⚠️ = debug 工具（`MCP_LS_DEBUG_TOOLS=1` 时注册）。日常通过 `search` 的 `strategy` 参数即可访问对应层。
 
 ### 智能路由规则
 
 当 `strategy="auto"` 时：
-- `intent` 包含 `todo`/`comment`/`string` → L1
-- `intent` 包含 `function`/`struct`/`class` → L2
-- `intent` 包含 `definition`/`reference`/`type` → L3
-- 无 `intent` → 并行搜索所有层
+- `intent` 包含 `todo`/`comment`/`string`/`注释`/`待办` → L1
+- `intent` 包含 `function`/`struct`/`class`/`函数`/`结构体` → L2
+- `intent` 包含 `definition`/`reference`/`type`/`定义`/`引用`/`调用` → L3
+- auto + intent → 单层归一化输出（层标 `unified-text`/`unified-ast`/`unified-symbol`）
+- auto 无 intent → 三层并行 + CodeAtom 归一化管道（层标 `unified`）：异构归一 → 物理吞并 → 语义去重 → 预算降级裁剪（≤12KB）
+
+### 缓存与索引行为
+
+- 搜索缓存：5 分钟 TTL（`MCP_LS_CACHE_TTL` 秒数可调），键含 query/strategy/filePath/language/intent；任意文件变更全量失效（防抖 300ms）
+- 启动 warmup：服务启动后自动打开 compile_commands.json 的首个翻译单元，触发 clangd 后台索引（否则 clangd 在首个 didOpen 前不索引，符号层持续降级）
+- 符号层降级：LSP 不可用/无结果时降级 ripgrep，标注 `symbol-fallback-text` + WARNING；带 filePath 锚点时按 include 邻域（compile_commands.json 提取，剔除全局无区分度目录）限定范围
 
 ---
 

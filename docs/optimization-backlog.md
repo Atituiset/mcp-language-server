@@ -10,13 +10,11 @@
 ### 1. ~~text 层忽略 filePath 参数~~ ✅ 已完成（本 commit）
 - 已修：text 层带锚点时按 include 邻域（可区分时）或文件本身限定搜索（`textRipgrepOptions`），unified 管道的 text 生产者同步生效；输出带 `NOTE: scoped to N file(s) via include map`。
 
-### 2. intent 路由路径接入归一化
-- **问题**：auto+intent 命中后走单层原样输出（仅 50 行/4KB 截断），不享受 Phase 1 的 merge/dedup/budget。同一 `search` 入口，两种输出语义不一致。
-- **落点**：`router.searchAuto` → 单层结果也过 atom 管道（单层内同样可能有 symbol+text 混合，如 fallback）。
+### 2. ~~intent 路由路径接入归一化~~ ✅ 已完成
+- 已修：auto+intent 改走 `searchLayerUnified`（单层产出也过 atom 归一化/去重/预算管道，层标 `unified-text|ast|symbol`）；显式 `strategy=` 保留原始单层格式作为逃生舱。
 
-### 3. `docs/MCP_TOOLS_ZH.md` 与默认 9 工具脱节
-- **问题**：该文档按 17 工具全量编写（debug 工具名出现 27 处），未反映 B4 收敛与 `MCP_LS_DEBUG_TOOLS` 机制。
-- **修法**：标注默认暴露的 9 个 + debug 8 个的启用方式；description 文案与新触发式对齐。
+### 3. ~~`docs/MCP_TOOLS_ZH.md` 与默认 9 工具脱节~~ ✅ 已完成
+- 已修：补默认 9 工具/MCP_LS_DEBUG_TOOLS 说明、debug 工具标注、search 新参数与 unified 输出示例、depth max 3、diagnostics contextLines 类型修正、路由规则（含中文 intent）、缓存/索引行为说明。
 
 ### 4. 集成测试快照环境漂移
 - **问题**：`go/hover`、`go/diagnostics`、clangd 全套在干净 `cc756da` 上即失败——gopls/clangd-18 输出格式与快照漂移，与代码改动无关（已用干净 worktree 双向验证）。watcher 三个测试在本环境失败（debounce/fsnotify 时序）。
