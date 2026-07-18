@@ -20,19 +20,19 @@ var watcherLogger = logging.NewLogger(logging.Watcher)
 
 // WorkspaceWatcher manages LSP file watching
 type WorkspaceWatcher struct {
-	client LSPClient
+	client        LSPClient
 	workspacePath string
 
-	config *WatcherConfig
+	config      *WatcherConfig
 	debounceMap map[string]*time.Timer
-	debounceMu sync.Mutex
+	debounceMu  sync.Mutex
 
-	registrations []protocol.FileSystemWatcher
+	registrations  []protocol.FileSystemWatcher
 	registrationMu sync.RWMutex
 
 	gitignore *GitignoreMatcher
 
-	OnFileChange func()
+	OnFileChange func(uri string)
 }
 
 // NewWorkspaceWatcher creates a new workspace watcher with default configuration
@@ -532,7 +532,7 @@ func (w *WorkspaceWatcher) debounceHandleFileEvent(ctx context.Context, uri stri
 // handleFileEvent sends file change notifications
 func (w *WorkspaceWatcher) handleFileEvent(ctx context.Context, uri string, changeType protocol.FileChangeType) {
 	if w.OnFileChange != nil {
-		w.OnFileChange()
+		w.OnFileChange(uri)
 	}
 
 	filePath := uri[7:]

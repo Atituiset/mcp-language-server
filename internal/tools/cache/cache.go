@@ -12,6 +12,9 @@ type CacheItem struct {
 	Value     interface{}
 	Timestamp time.Time
 	TTL       time.Duration
+	// Files records the workspace files a cached value depends on, for
+	// per-file invalidation (nil = unknown, cleared on any change).
+	Files []string
 }
 
 func (c *CacheItem) IsExpired() bool {
@@ -71,6 +74,43 @@ func (c *Cache) Set(key string, value interface{}, ttl time.Duration) {
 		Value:     value,
 		Timestamp: time.Now(),
 		TTL:       ttl,
+	}
+}
+
+// SetWithFiles is Set plus the file dependency set used by DeleteByFile.
+func (c *Cache) SetWithFiles(key string, value interface{}, ttl time.Duration, files []string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if ttl == 0 {
+		ttl = c.ttl
+	}
+
+	c.items[key] = &CacheItem{
+		Value:     value,
+		Timestamp: time.Now(),
+		TTL:       ttl,
+		Files:     files,
+	}
+}
+
+// DeleteByFile removes entries whose file dependency set contains path.
+// Entries without dependency info are removed as well (conservative).
+func (c *Cache) DeleteByFile(path string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	for key, item := range c.items {
+		if item.Files == nil {
+			delete(c.items, key)
+			continue
+		}
+		for _, f := range item.Files {
+			if f == path {
+				delete(c.items, key)
+				break
+			}
+		}
 	}
 }
 

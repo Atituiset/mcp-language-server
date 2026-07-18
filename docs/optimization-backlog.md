@@ -33,22 +33,21 @@
 ### 7. ~~rg 命中 ±2 行上下文扩展~~ ✅ 已完成（本 commit）
 - 已修：snippet 原子按匹配行 ±2 行扩展（`snippetExpander`，带每文件行偏移缓存），相邻命中窗口经物理吞并自动合并；Signature 保持单行用于 L1 降级。实测 u-boot TODO：相邻 TODO 窗口合并后原子数 1683→1459，Kconfig 命中带完整 help 上下文。
 
-### 8. 交错块 LCA 合并
-- **内容**：重叠（非包含）AST 块用 tree-sitter 找最近公共祖先合并，替代 Phase 1 的直接吞并。
+### 8. ~~交错块 LCA 合并~~ ✅ 已完成（务实方案）
+- 已修：同一棵树的 AST 节点只会相离或包含，部分交错只发生在 rg 窗口跨进 AST 节点时——`MergePhysical` 改为交错时按 Priority 取舍（高优先级胜），完整 LCA 重解析合并收益过低，不再立项。
 
 ### 9. USR 全局符号身份
 - **内容**：`SemanticID` 从 `name@path` 升级为 clangd USR，实现跨文件真去重。
 - **难点**：LSP 协议不暴露 USR；只能读 clangd 索引分片（`.cache/clangd/index`，格式非稳定 ABI）或换 C++ 侧通道，成本高。
 
-### 10. B10 缓存按文件失效
-- **现状**：任意文件保存 → 全量 Clear（防抖 300ms 兜底）。atom 化后可行：缓存条目记录涉及的文件集合，失效时按文件反查。
+### 10. ~~B10 缓存按文件失效~~ ✅ 已完成（本 commit）
+- 已修：缓存条目携带文件依赖集（`SetWithFiles`，unified 结果从原子收集，含被裁剪丢弃的贡献文件）；watcher `OnFileChange` 传文件 URI，`Router.InvalidateFile` 只失效依赖该文件的条目；无依赖信息的条目保守失效。
 
 ### 11. ~~QueryDirectory 全仓 AST 解析性能~~ ✅ 已完成（本 commit）
 - 已修：worker pool 并发解析（每 worker 独立 parser + 查询只编译一次）+ 无效 CSP 模式预编译失败快速返回。实测 u-boot 全仓 13k 文件 struct_specifier 扫描 2.8s（19 万+ 命中）；无效模式 0.12s 报错（原行为：全仓慢扫一遍后静默返回空）。auto 融合路径对"非 CSP 查询"保持静默跳过（不污染统一结果）。
 
-### 12. callers 压测对象修正
-- **问题**：srsRAN 基线选的 `handle_rrc_setup_request` 仅 1 个调用者（统一 dispatch 架构），压不出调用链体积。
-- **修法**：换热点函数（srslog 系列、byte_buffer、span 等基础设施）重测。
+### 12. ~~callers 压测对象修正~~ ✅ 已完成
+- 已修：换 `srsran::byte_buffer::append`（1415 处引用）重测，depth=3 → 1329 调用者 / 16.6KB（触发截断）。数据已回填 benchmark §6。
 
 ---
 

@@ -44,6 +44,9 @@ type SearchResult struct {
 	Layer   string
 	Content string
 	Count   int
+	// Files lists the workspace files this result depends on, used for
+	// per-file cache invalidation (nil = unknown, cleared on any change).
+	Files []string
 }
 
 const defaultCacheTTL = 300
@@ -120,7 +123,17 @@ func (r *Router) Search(ctx context.Context, opts SearchOptions) ([]SearchResult
 	}
 
 	if err == nil && r.cache != nil {
-		r.cache.Set(cacheKey, results, 0)
+		seen := map[string]bool{}
+		var files []string
+		for _, res := range results {
+			for _, f := range res.Files {
+				if !seen[f] {
+					seen[f] = true
+					files = append(files, f)
+				}
+			}
+		}
+		r.cache.SetWithFiles(cacheKey, results, 0, files)
 	}
 
 	return results, err
@@ -130,6 +143,38 @@ func (r *Router) ClearCache() {
 	if r.cache != nil {
 		r.cache.Clear()
 	}
+}
+
+// InvalidateFile drops cached search results that depend on the changed
+// file (called by the workspace watcher). Entries without file-dependency
+// info are cleared conservatively.
+func (r *Router) InvalidateFile(uri string) {
+	if r.cache == nil {
+		return
+	}
+	r.cache.DeleteByFile(strings.TrimPrefix(uri, "file://"))
+}
+
+// resultFiles collects the absolute file dependency set of normalized
+// atoms (including atoms later dropped by merge/dedup/crop — a change to
+// any contributing file could alter the outcome).
+func (r *Router) resultFiles(atoms []atom.CodeAtom) []string {
+	seen := map[string]bool{}
+	files := make([]string, 0, 16)
+	for _, a := range atoms {
+		p := a.FilePath
+		if p == "" {
+			continue
+		}
+		if !filepath.IsAbs(p) {
+			p = filepath.Join(r.workspaceDir, p)
+		}
+		if !seen[p] {
+			seen[p] = true
+			files = append(files, p)
+		}
+	}
+	return files
 }
 
 // getIncludeMap lazily loads the compile_commands.json include mapping.
@@ -346,6 +391,7 @@ func (r *Router) searchLayerUnified(ctx context.Context, opts SearchOptions, lay
 		return []SearchResult{{Layer: "unified-" + layer, Content: "No results found", Count: 0}}, nil
 	}
 
+	depFiles := r.resultFiles(atoms)
 	atoms = atom.MergePhysical(atoms)
 	atoms = atom.DedupSemantic(atoms)
 	kept, stats := atom.CropBudget(atoms, unifiedBudgetBytes)
@@ -354,7 +400,7 @@ func (r *Router) searchLayerUnified(ctx context.Context, opts SearchOptions, lay
 	if warning != "" {
 		content = warning + "\n" + content
 	}
-	return []SearchResult{{Layer: "unified-" + layer, Content: content, Count: stats.Total - stats.Dropped}}, nil
+	return []SearchResult{{Layer: "unified-" + layer, Content: content, Count: stats.Total - stats.Dropped, Files: depFiles}}, nil
 }
 
 // unifiedBudgetBytes is the payload budget for searchAll output
@@ -463,6 +509,7 @@ func (r *Router) searchAll(ctx context.Context, opts SearchOptions) ([]SearchRes
 		return []SearchResult{{Layer: "unified", Content: "No results found", Count: 0}}, nil
 	}
 
+	depFiles := r.resultFiles(atoms)
 	atoms = atom.MergePhysical(atoms)
 	atoms = atom.DedupSemantic(atoms)
 	kept, stats := atom.CropBudget(atoms, unifiedBudgetBytes)
@@ -476,7 +523,7 @@ func (r *Router) searchAll(ctx context.Context, opts SearchOptions) ([]SearchRes
 		content = warning + "\n" + content
 	}
 
-	return []SearchResult{{Layer: "unified", Content: content, Count: stats.Total - stats.Dropped}}, nil
+	return []SearchResult{{Layer: "unified", Content: content, Count: stats.Total - stats.Dropped, Files: depFiles}}, nil
 }
 
 // querySymbols queries the LSP workspace/symbol endpoint. fallback=true

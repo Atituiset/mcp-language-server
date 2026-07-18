@@ -238,6 +238,33 @@ func TestSnippetExpansion(t *testing.T) {
 	}
 }
 
+func TestInvalidateFileOnlyDropsDependent(t *testing.T) {
+	dir := t.TempDir()
+	src := "int main(void) {\n\t// TODO: fix this\n\treturn 0;\n}\n"
+	mainPath := filepath.Join(dir, "main.c")
+	if err := os.WriteFile(mainPath, []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	r := NewRouter(dir)
+	if _, err := r.Search(context.Background(), SearchOptions{Query: "TODO", Strategy: "auto"}); err != nil {
+		t.Fatalf("search failed: %v", err)
+	}
+	if r.CacheSize() != 1 {
+		t.Fatalf("expected 1 cached entry, got %d", r.CacheSize())
+	}
+
+	r.InvalidateFile("file://" + filepath.Join(dir, "unrelated.c"))
+	if r.CacheSize() != 1 {
+		t.Errorf("unrelated file change must keep the entry, size=%d", r.CacheSize())
+	}
+
+	r.InvalidateFile("file://" + mainPath)
+	if r.CacheSize() != 0 {
+		t.Errorf("dependent file change must drop the entry, size=%d", r.CacheSize())
+	}
+}
+
 func TestByteOffsetOfLine(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "f.c")

@@ -116,6 +116,17 @@ func TestCropBudgetDropsWhenReferenceTooBig(t *testing.T) {
 	}
 }
 
+func TestMergePhysicalOverlapPrefersHigherPriority(t *testing.T) {
+	window := mkAtom("a.c", 95, 104, "rg-window", 1)
+	fn := mkAtom("a.c", 100, 500, "func", 2)
+	fn.Kind = KindFunction
+
+	out := MergePhysical([]CodeAtom{window, fn})
+	if len(out) != 1 || out[0].SemanticID != "func" {
+		t.Errorf("expected higher-priority function to win the overlap, got %+v", out)
+	}
+}
+
 func TestMergePhysicalParentChildFolding(t *testing.T) {
 	parent := mkAtom("a.c", 100, 500, "parent", 2)
 	parent.Kind = KindStruct

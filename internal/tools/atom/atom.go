@@ -134,8 +134,18 @@ func MergePhysical(atoms []CodeAtom) []CodeAtom {
 				continue
 			}
 			if atoms[i].StartByte < maxEnd && maxEnd >= 0 {
-				// overlapping (non-contained): swallowed (LCA merge is out of scope)
-				dropped[i] = true
+				// Partial overlap (only possible between heterogeneous
+				// sources, e.g. an rg window crossing into an AST node —
+				// nodes from one tree are always disjoint or nested).
+				// Keep the higher-Priority side; full LCA-merge via
+				// re-parsing is deferred (docs/optimization-backlog.md).
+				if atoms[i].Priority > atoms[container].Priority {
+					dropped[container] = true
+					maxEnd = atoms[i].EndByte
+					container = i
+				} else {
+					dropped[i] = true
+				}
 				continue
 			}
 			if atoms[i].EndByte > maxEnd {

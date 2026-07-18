@@ -151,8 +151,8 @@ func (s *mcpServer) start() error {
 		coreLogger.Info("Using search cache TTL: %ds", v)
 	}
 	s.searchRouter = router.NewRouterWithClient(s.config.workspaceDir, s.lspClient, cacheTTL...)
-	s.workspaceWatcher.OnFileChange = func() {
-		s.searchRouter.ClearCache()
+	s.workspaceWatcher.OnFileChange = func(uri string) {
+		s.searchRouter.InvalidateFile(uri)
 	}
 
 	s.mcpServer = server.NewMCPServer(
