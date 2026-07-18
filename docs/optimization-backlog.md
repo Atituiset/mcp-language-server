@@ -24,12 +24,11 @@
 
 ## P2 能力增强（CodeAtom IR Phase 2 方向）
 
-### 5. 父子结构折叠（code-atom-ir §3.3）
-- **内容**：父级容器（大函数/struct/class）与子命中同时存在时，父级降为 Signature 骨架、子级保留 L0，省 ~90% 无关实现代码。
-- **前置**：需要原子的层级关系（tree-sitter 原生可得）+ definition 载荷。
+### 5. ~~父子结构折叠（code-atom-ir §3.3）~~ ✅ 已完成（本 commit）
+- 已修：`MergePhysical` 对"可折叠容器（FUNCTION/STRUCT）包含子原子"的场景不再吞并子级，而是保留两者并将容器 `MaxLevel` 降为 L1 骨架；`CropBudget` 从 MaxLevel 起试装。
 
-### 6. symbol 原子 L0 载荷
-- **内容**：对 Top-N 高优先 symbol 原子按需发 `textDocument/definition` 抓实现体（限制 N 控延迟），当前 symbol 原子只有 L1/L2。
+### 6. ~~symbol 原子 L0 载荷~~ ✅ 已完成（本 commit）
+- 已修：symbol 原子 Top-5 经 `GetFullDefinition` 抓 definition 作 L0 载荷（延迟护栏）。实测 `intent=definition` 查 device_probe：5 个 L0 完整实现体 + 1 个 L1，7.7KB/8KB 预算。
 
 ### 7. ~~rg 命中 ±2 行上下文扩展~~ ✅ 已完成（本 commit）
 - 已修：snippet 原子按匹配行 ±2 行扩展（`snippetExpander`，带每文件行偏移缓存），相邻命中窗口经物理吞并自动合并；Signature 保持单行用于 L1 降级。实测 u-boot TODO：相邻 TODO 窗口合并后原子数 1683→1459，Kconfig 命中带完整 help 上下文。

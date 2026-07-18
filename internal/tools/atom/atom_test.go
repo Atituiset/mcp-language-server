@@ -116,6 +116,39 @@ func TestCropBudgetDropsWhenReferenceTooBig(t *testing.T) {
 	}
 }
 
+func TestMergePhysicalParentChildFolding(t *testing.T) {
+	parent := mkAtom("a.c", 100, 500, "parent", 2)
+	parent.Kind = KindStruct
+	parent.FullContent = "struct big { ... 400 bytes ... }"
+	child := mkAtom("a.c", 200, 250, "child", 1)
+	child.Kind = KindFunction
+
+	out := MergePhysical([]CodeAtom{parent, child})
+	if len(out) != 2 {
+		t.Fatalf("expected both atoms kept after folding, got %d", len(out))
+	}
+	for _, a := range out {
+		if a.SemanticID == "parent" && a.MaxLevel != LevelSignature {
+			t.Errorf("expected parent folded to L1, got MaxLevel=%d", a.MaxLevel)
+		}
+		if a.SemanticID == "child" && a.MaxLevel != LevelFull {
+			t.Errorf("expected child at L0, got MaxLevel=%d", a.MaxLevel)
+		}
+	}
+}
+
+func TestCropBudgetRespectsMaxLevel(t *testing.T) {
+	a := CodeAtom{
+		SemanticID: "p", FilePath: "f.c",
+		FullContent: "full-body", Signature: "sig", Reference: "ref",
+		MaxLevel: LevelSignature, Priority: 1,
+	}
+	kept, _ := CropBudget([]CodeAtom{a}, 4096)
+	if len(kept) != 1 || kept[0].Level != LevelSignature {
+		t.Fatalf("expected atom at L1 due to MaxLevel, got %+v", kept)
+	}
+}
+
 func TestRender(t *testing.T) {
 	atoms := []CodeAtom{
 		{SemanticID: "a", Name: "foo", Kind: KindSnippet, FilePath: "f.c",

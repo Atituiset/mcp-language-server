@@ -54,6 +54,11 @@ type CodeAtom struct {
 	SourceTool string  // "rg" | "tree-sitter" | "clangd"
 	Priority   float64 // base: clangd=3, tree-sitter=2, rg=1
 
+	// MaxLevel caps the payload level CropBudget may start from
+	// (LevelFull by default). Parent-child folding (docs §3.3) sets it to
+	// LevelSignature so containers render as skeletons.
+	MaxLevel int
+
 	// Level is the payload level chosen by CropBudget (LevelFull by default).
 	Level int
 }
@@ -82,6 +87,12 @@ func (a *CodeAtom) payload() string {
 	}
 }
 
+// foldable reports whether a container kind can be degraded to a skeleton
+// in parent-child folding (docs §3.3): functions and struct-like blocks.
+func foldable(k Kind) bool {
+	return k == KindFunction || k == KindStruct
+}
+
 // MergePhysical performs the sweep-line merge (docs §3.1): within each file,
 // atoms sorted by StartByte; an atom whose range is contained in or overlaps
 // an already-kept atom's range is swallowed. The kept atom is the one with
@@ -106,17 +117,30 @@ func MergePhysical(atoms []CodeAtom) []CodeAtom {
 		})
 
 		maxEnd := -1
+		container := -1 // index of the kept atom that set maxEnd
 		for _, i := range idxs {
 			if atoms[i].StartByte < 0 {
 				continue // unknown coordinates: bypass physical merging
 			}
-			if atoms[i].EndByte <= maxEnd || (atoms[i].StartByte < maxEnd && maxEnd >= 0) {
-				// contained in, or overlapping, a kept atom's range
+			if atoms[i].EndByte <= maxEnd {
+				// Fully contained. Parent-child folding (docs §3.3): when the
+				// container is a foldable code block, degrade it to a skeleton
+				// and keep the child — otherwise swallow the child.
+				if container >= 0 && foldable(atoms[container].Kind) {
+					atoms[container].MaxLevel = LevelSignature
+					continue
+				}
+				dropped[i] = true
+				continue
+			}
+			if atoms[i].StartByte < maxEnd && maxEnd >= 0 {
+				// overlapping (non-contained): swallowed (LCA merge is out of scope)
 				dropped[i] = true
 				continue
 			}
 			if atoms[i].EndByte > maxEnd {
 				maxEnd = atoms[i].EndByte
+				container = i
 			}
 		}
 	}
@@ -191,7 +215,7 @@ func CropBudget(atoms []CodeAtom, budget int) ([]CodeAtom, CropStats) {
 			overhead += len(a.FilePath) + renderFileOverhead
 		}
 		placed := false
-		for level := LevelFull; level <= LevelReference; level++ {
+		for level := a.MaxLevel; level <= LevelReference; level++ {
 			size := a.payloadLen(level)
 			if size == 0 {
 				continue // empty payload at this level, try the next one down

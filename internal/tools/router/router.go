@@ -322,7 +322,7 @@ func (r *Router) searchLayerUnified(ctx context.Context, opts SearchOptions, lay
 		if err != nil {
 			return nil, err
 		}
-		atoms = atomsFromSymbols(symbols, map[string][]byte{})
+		atoms = r.atomsFromSymbols(ctx, symbols, map[string][]byte{})
 		if fallback {
 			fbOpts, scoped := r.scopedRipgrepOptions(opts, tools.RipgrepOptions{
 				MaxCount:      100,
@@ -439,7 +439,7 @@ func (r *Router) searchAll(ctx context.Context, opts SearchOptions) ([]SearchRes
 	atoms = append(atoms, atomsFromTextMatches(textMatches, "rg", exp)...)
 	atoms = append(atoms, atomsFromTreeSitter(astResults)...)
 	fileCache := map[string][]byte{}
-	atoms = append(atoms, atomsFromSymbols(symbols, fileCache)...)
+	atoms = append(atoms, r.atomsFromSymbols(ctx, symbols, fileCache)...)
 
 	fallbackScoped := 0
 	if symbolFallback {
@@ -609,12 +609,16 @@ func atomsFromTreeSitter(results []treesitter.QueryResult) []atom.CodeAtom {
 	return atoms
 }
 
+// maxSymbolDefinitions caps how many symbol atoms get their FullContent
+// fetched via LSP definition calls (per-query latency guard).
+const maxSymbolDefinitions = 5
+
 // atomsFromSymbols normalizes LSP symbols (docs §1: global semantic symbols;
-// Phase 1 uses FQN-style IDs since LSP does not expose USRs, and carries no
-// FullContent to avoid per-symbol definition round-trips).
-func atomsFromSymbols(symbols []protocol.WorkspaceSymbolResult, fileCache map[string][]byte) []atom.CodeAtom {
+// Phase 1 uses FQN-style IDs since LSP does not expose USRs). The top
+// maxSymbolDefinitions symbols also fetch their definition as L0 payload.
+func (r *Router) atomsFromSymbols(ctx context.Context, symbols []protocol.WorkspaceSymbolResult, fileCache map[string][]byte) []atom.CodeAtom {
 	atoms := make([]atom.CodeAtom, 0, len(symbols))
-	for _, sym := range symbols {
+	for i, sym := range symbols {
 		loc := sym.GetLocation()
 		path := loc.URI.Path()
 		line := int(loc.Range.Start.Line) + 1
@@ -624,7 +628,7 @@ func atomsFromSymbols(symbols []protocol.WorkspaceSymbolResult, fileCache map[st
 		if offset >= 0 {
 			endByte = offset + len(name)
 		}
-		atoms = append(atoms, atom.CodeAtom{
+		a := atom.CodeAtom{
 			SemanticID: fmt.Sprintf("%s@%s", name, path),
 			Name:       name,
 			Kind:       atom.KindSymbol,
@@ -635,7 +639,15 @@ func atomsFromSymbols(symbols []protocol.WorkspaceSymbolResult, fileCache map[st
 			Reference:  fmt.Sprintf("%s:%d: %s", path, line, name),
 			SourceTool: "clangd",
 			Priority:   3,
-		})
+		}
+		if r.lspClient != nil && i < maxSymbolDefinitions {
+			if err := r.lspClient.OpenFile(ctx, path); err == nil {
+				if def, _, err := tools.GetFullDefinition(ctx, r.lspClient, loc); err == nil {
+					a.FullContent = def
+				}
+			}
+		}
+		atoms = append(atoms, a)
 	}
 	return atoms
 }
