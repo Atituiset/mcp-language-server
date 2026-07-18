@@ -223,9 +223,14 @@ func CropBudget(atoms []CodeAtom, budget int) ([]CodeAtom, CropStats) {
 // Render formats the surviving atoms grouped by file, with a statistics
 // header and a narrowing hint when the budget dropped atoms.
 func Render(atoms []CodeAtom, stats CropStats) string {
+	return RenderWithLabel(atoms, stats, "unified")
+}
+
+// RenderWithLabel is Render with a custom layer label in the header.
+func RenderWithLabel(atoms []CodeAtom, stats CropStats, label string) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "=== [unified] (%d atoms, %d shown: %d full / %d signature / %d reference, %d dropped, %.1fKB of %.0fKB budget) ===\n\n",
-		stats.Total, stats.Total-stats.Dropped,
+	fmt.Fprintf(&b, "=== [%s] (%d atoms, %d shown: %d full / %d signature / %d reference, %d dropped, %.1fKB of %.0fKB budget) ===\n\n",
+		label, stats.Total, stats.Total-stats.Dropped,
 		stats.KeptFull, stats.KeptSignature, stats.KeptReference, stats.Dropped,
 		float64(stats.BytesUsed)/1024, float64(stats.Budget)/1024)
 

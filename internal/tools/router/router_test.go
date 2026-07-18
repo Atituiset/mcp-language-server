@@ -61,6 +61,37 @@ func TestSearchAllNoResults(t *testing.T) {
 	}
 }
 
+func TestSearchAutoIntentRoutedUnified(t *testing.T) {
+	dir := t.TempDir()
+	src := "int main(void) {\n\t// TODO: fix this\n\treturn 0;\n}\n"
+	if err := os.WriteFile(filepath.Join(dir, "main.c"), []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	r := NewRouter(dir)
+	results, err := r.Search(context.Background(), SearchOptions{
+		Query:    "TODO",
+		Strategy: "auto",
+		Intent:   "todo",
+	})
+	if err != nil {
+		t.Fatalf("search failed: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("expected a single result, got %d", len(results))
+	}
+	if results[0].Layer != "unified-text" {
+		t.Errorf("expected unified-text layer, got %q", results[0].Layer)
+	}
+	content := results[0].Content
+	if !strings.Contains(content, "=== [unified-text]") {
+		t.Errorf("expected unified stats header, got:\n%s", content)
+	}
+	if !strings.Contains(content, "TODO: fix this") {
+		t.Errorf("expected the TODO hit, got:\n%s", content)
+	}
+}
+
 func TestSearchSymbolFallbackScopedByIncludeMap(t *testing.T) {
 	dir := t.TempDir()
 

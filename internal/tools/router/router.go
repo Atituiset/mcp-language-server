@@ -107,7 +107,7 @@ func (r *Router) Search(ctx context.Context, opts SearchOptions) ([]SearchResult
 
 	if err == nil {
 		for i := range results {
-			if results[i].Layer == "unified" {
+			if strings.HasPrefix(results[i].Layer, "unified") {
 				continue // unified output carries its own budget cap
 			}
 			hint := results[i].Layer
@@ -273,16 +273,86 @@ func (r *Router) searchAuto(ctx context.Context, opts SearchOptions) ([]SearchRe
 	if opts.Intent != "" {
 		strategy := r.routeByIntent(opts.Intent)
 		switch strategy {
-		case "text":
-			return r.searchText(ctx, opts)
-		case "ast":
-			return r.searchAST(ctx, opts)
-		case "symbol":
-			return r.searchSymbol(ctx, opts)
+		case "text", "ast", "symbol":
+			return r.searchLayerUnified(ctx, opts, strategy)
 		}
 	}
 
 	return r.searchAll(ctx, opts)
+}
+
+// searchLayerUnified runs a single intent-routed layer through the same
+// normalize/merge/dedup/crop pipeline as searchAll, keeping auto-path
+// output semantics consistent regardless of intent routing. Explicit
+// strategy=text|ast|symbol calls keep the raw single-layer format.
+func (r *Router) searchLayerUnified(ctx context.Context, opts SearchOptions, layer string) ([]SearchResult, error) {
+	var atoms []atom.CodeAtom
+	warning := ""
+
+	switch layer {
+	case "text":
+		rgOpts, _ := r.textRipgrepOptions(opts, tools.RipgrepOptions{
+			MaxCount:      opts.MaxCount,
+			ContextLines:  opts.ContextLines,
+			CaseSensitive: opts.CaseSensitive,
+			WholeWord:     opts.WholeWord,
+		})
+		if rgOpts.MaxCount <= 0 {
+			rgOpts.MaxCount = 100
+		}
+		matches, err := tools.SearchCodeMatches(ctx, r.workspaceDir, opts.Query, rgOpts)
+		if err != nil {
+			return nil, err
+		}
+		atoms = atomsFromTextMatches(matches, "rg")
+	case "ast":
+		language := opts.Language
+		if language == "" {
+			language = "cpp"
+		}
+		results, err := tools.RunTreesitterQueryResults(ctx, r.workspaceDir, opts.Query, opts.FilePath, language)
+		if err != nil {
+			return nil, err
+		}
+		atoms = atomsFromTreeSitter(results)
+	case "symbol":
+		symbols, fallback, err := r.querySymbols(ctx, opts.Query)
+		if err != nil {
+			return nil, err
+		}
+		atoms = atomsFromSymbols(symbols, map[string][]byte{})
+		if fallback {
+			fbOpts, scoped := r.scopedRipgrepOptions(opts, tools.RipgrepOptions{
+				MaxCount:      100,
+				CaseSensitive: true,
+			})
+			fbMatches, fbErr := tools.SearchCodeMatches(ctx, r.workspaceDir, opts.Query, fbOpts)
+			if fbErr != nil {
+				return nil, fbErr
+			}
+			atoms = append(atoms, atomsFromTextMatches(fbMatches, "rg(lsp-fallback)")...)
+			warning = "WARNING: LSP unavailable, results are plain text matches"
+			if scoped > 0 {
+				warning += fmt.Sprintf(" (scoped to %d files via include map)", scoped)
+			}
+		}
+	default:
+		return r.searchAll(ctx, opts)
+	}
+
+	if len(atoms) == 0 {
+		return []SearchResult{{Layer: "unified-" + layer, Content: "No results found", Count: 0}}, nil
+	}
+
+	atoms = atom.MergePhysical(atoms)
+	atoms = atom.DedupSemantic(atoms)
+	kept, stats := atom.CropBudget(atoms, unifiedBudgetBytes)
+
+	content := atom.RenderWithLabel(kept, stats, "unified-"+layer)
+	if warning != "" {
+		content = warning + "\n" + content
+	}
+	return []SearchResult{{Layer: "unified-" + layer, Content: content, Count: stats.Total - stats.Dropped}}, nil
 }
 
 // unifiedBudgetBytes is the payload budget for searchAll output
