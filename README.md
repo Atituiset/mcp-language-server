@@ -167,6 +167,32 @@ This is an [MCP](https://modelcontextprotocol.io/introduction) server that runs 
   </div>
 </details>
 
+## Deployment modes
+
+**Single client (default)**: your MCP client launches one `mcp-language-server` per workspace over stdio, as shown above. Nothing else to do.
+
+**Multiple client processes sharing one workspace** (e.g. several agent workers on one machine): use the daemon+proxy mode so all clients share a **single** language server instance instead of each spawning its own (N × clangd on a large repo exhausts memory quickly):
+
+```json
+{
+  "mcpServers": {
+    "language-server": {
+      "command": "mcp-language-server",
+      "args": ["proxy", "--workspace", "/path/to/project", "--lsp", "clangd"]
+    }
+  }
+}
+```
+
+The first proxy auto-spawns a per-workspace **daemon** (single LSP process, file watcher, shared search cache) serving streamable HTTP on a random loopback port; subsequent proxies reuse it. The daemon exits after 30 minutes with no clients (`--idle-timeout` to tune). See `docs/daemon-proxy-design.md` for the design.
+
+Manual daemon control:
+
+```bash
+mcp-language-server daemon --workspace /path/to/project --lsp clangd \
+    [--addr 127.0.0.1:0] [--idle-timeout 30m]
+```
+
 ## Tools
 
 - `definition`: Retrieves the complete source code definition of any symbol (function, type, constant, etc.) from your codebase.

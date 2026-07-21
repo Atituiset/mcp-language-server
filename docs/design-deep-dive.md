@@ -266,6 +266,8 @@ parseConfig → newServer → start:
 | 文件 | 职责 | 关键函数/类型 | 测试 |
 |------|------|--------------|------|
 | main.go | 入口、编排、warmup、关闭 | `start` `warmUpLSP` `cleanup` | — |
+| daemon.go | daemon 部署：HTTP 传输、会话文件、idle 回收 | `runDaemon` `sessionLive` | daemon_test.go |
+| proxy.go | stdio↔daemon 桥接、daemon 自动拉起 | `runProxy` `ensureDaemon` `mirrorTools` | （e2e 冒烟验证） |
 | tools.go | 工具注册（条件）+ 参数解析 | `registerTools` `formatSearchResults` | — |
 | internal/tools/router/router.go | 路由、三层扇出、归一化生产 | `Search` `searchAll` `searchLayerUnified` | router_test.go, router_mock_test.go |
 | internal/tools/atom/atom.go | IR + 三算法 | `MergePhysical` `DedupSemantic` `CropBudget` | atom_test.go |
@@ -284,7 +286,7 @@ parseConfig → newServer → start:
 
 ## 8. 已知边界与未落地项
 
-- **单 workspace + 单 LSP 进程**：多语言混合仓需跑多个 MCP 实例；`os.Chdir(workspaceDir)` 断了单进程多仓的扩展路。
+- **单 workspace + 单 LSP 实例**：多进程客户端的"N 份 LSP 导致 OOM"已由 daemon+proxy 部署模式解决（daemon 独占 LSP，proxy 做 stdio 桥接，见《docs/daemon-proxy-design.md》）；多语言混合仓仍需按语言各跑一个 daemon。`os.Chdir(workspaceDir)` 使单进程只能服务一个仓。
 - **tree-sitter 仅 C/C++**：Go/Rust/Python 仓的 ast 层静默无贡献（`search` 的 language 默认 "cpp" 暴露了 C/C++ 优先偏向）。
 - **USR 全局符号身份未落地**（backlog #9）：LSP 不暴露，需读 clangd 索引私有格式；当前用 `name@path` 近似，同名符号跨文件会串。
 - **LSP 进程不自动重启**：死亡后只能降级运行，需重启 MCP server 恢复符号层。

@@ -38,39 +38,56 @@ type mcpServer struct {
 	cancelFunc       context.CancelFunc
 	workspaceWatcher *watcher.WorkspaceWatcher
 	searchRouter     *router.Router
+	// serverOptions are appended to the NewMCPServer options (daemon mode
+	// uses this to install session hooks).
+	serverOptions []server.ServerOption
+}
+
+func newConfigFlagSet(name string, cfg *config) *flag.FlagSet {
+	fs := flag.NewFlagSet(name, flag.ContinueOnError)
+	fs.StringVar(&cfg.workspaceDir, "workspace", "", "Path to workspace directory")
+	fs.StringVar(&cfg.lspCommand, "lsp", "", "LSP command to run (args should be passed after --)")
+	return fs
+}
+
+func (c *config) validate() error {
+	if c.workspaceDir == "" {
+		return fmt.Errorf("workspace directory is required")
+	}
+
+	workspaceDir, err := filepath.Abs(c.workspaceDir)
+	if err != nil {
+		return fmt.Errorf("failed to get absolute path for workspace: %v", err)
+	}
+	c.workspaceDir = workspaceDir
+
+	if _, err := os.Stat(c.workspaceDir); os.IsNotExist(err) {
+		return fmt.Errorf("workspace directory does not exist: %s", c.workspaceDir)
+	}
+
+	if c.lspCommand == "" {
+		return fmt.Errorf("LSP command is required")
+	}
+
+	if _, err := exec.LookPath(c.lspCommand); err != nil {
+		return fmt.Errorf("LSP command not found: %s", c.lspCommand)
+	}
+
+	return nil
 }
 
 func parseConfig() (*config, error) {
 	cfg := &config{}
-	flag.StringVar(&cfg.workspaceDir, "workspace", "", "Path to workspace directory")
-	flag.StringVar(&cfg.lspCommand, "lsp", "", "LSP command to run (args should be passed after --)")
-	flag.Parse()
+	fs := newConfigFlagSet(os.Args[0], cfg)
+	if err := fs.Parse(os.Args[1:]); err != nil {
+		return nil, err
+	}
 
 	// Get remaining args after -- as LSP arguments
-	cfg.lspArgs = flag.Args()
+	cfg.lspArgs = fs.Args()
 
-	// Validate workspace directory
-	if cfg.workspaceDir == "" {
-		return nil, fmt.Errorf("workspace directory is required")
-	}
-
-	workspaceDir, err := filepath.Abs(cfg.workspaceDir)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get absolute path for workspace: %v", err)
-	}
-	cfg.workspaceDir = workspaceDir
-
-	if _, err := os.Stat(cfg.workspaceDir); os.IsNotExist(err) {
-		return nil, fmt.Errorf("workspace directory does not exist: %s", cfg.workspaceDir)
-	}
-
-	// Validate LSP command
-	if cfg.lspCommand == "" {
-		return nil, fmt.Errorf("LSP command is required")
-	}
-
-	if _, err := exec.LookPath(cfg.lspCommand); err != nil {
-		return nil, fmt.Errorf("LSP command not found: %s", cfg.lspCommand)
+	if err := cfg.validate(); err != nil {
+		return nil, err
 	}
 
 	return cfg, nil
@@ -139,7 +156,10 @@ func (s *mcpServer) warmUpLSP() {
 	coreLogger.Info("LSP warmup: opened %s to trigger background indexing", file)
 }
 
-func (s *mcpServer) start() error {
+// setup performs all initialization shared by the stdio and daemon modes:
+// LSP startup, warmup, search router wiring, and MCP tool registration.
+// Only the transport differs (ServeStdio vs HTTP).
+func (s *mcpServer) setup() error {
 	if err := s.initializeLSP(); err != nil {
 		return err
 	}
@@ -159,12 +179,15 @@ func (s *mcpServer) start() error {
 		}
 	}
 
-	s.mcpServer = server.NewMCPServer(
-		"MCP Language Server",
-		"v0.3.0",
+	serverOpts := append([]server.ServerOption{
 		server.WithLogging(),
 		server.WithRecovery(),
 		server.WithResourceCapabilities(false, true),
+	}, s.serverOptions...)
+	s.mcpServer = server.NewMCPServer(
+		"MCP Language Server",
+		"v0.3.0",
+		serverOpts...,
 	)
 
 	s.registerUIResources()
@@ -173,12 +196,37 @@ func (s *mcpServer) start() error {
 	if err != nil {
 		return fmt.Errorf("tool registration failed: %v", err)
 	}
+	return nil
+}
+
+func (s *mcpServer) start() error {
+	if err := s.setup(); err != nil {
+		return err
+	}
 
 	return server.ServeStdio(s.mcpServer)
 }
 
 func main() {
 	coreLogger.Info("MCP Language Server starting")
+
+	// Subcommand dispatch: daemon/proxy change the deployment shape (one
+	// shared LSP per workspace); no subcommand keeps the classic
+	// one-process-per-client stdio mode.
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "daemon":
+			if err := runDaemon(os.Args[2:]); err != nil {
+				coreLogger.Fatal("daemon: %v", err)
+			}
+			return
+		case "proxy":
+			if err := runProxy(os.Args[2:]); err != nil {
+				coreLogger.Fatal("proxy: %v", err)
+			}
+			return
+		}
+	}
 
 	done := make(chan struct{})
 	sigChan := make(chan os.Signal, 1)

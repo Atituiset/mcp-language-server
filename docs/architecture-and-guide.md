@@ -17,6 +17,13 @@
 mcp-language-server --workspace <repo> --lsp clangd [-- <lsp-args>]
 ```
 
+部署模式（2026-07-20 起）：
+
+| 模式 | 命令 | 适用 |
+|------|------|------|
+| 独立 stdio（默认） | `mcp-language-server --workspace X --lsp Y` | 单客户端进程；1 客户端 = 1 本进程 = 1 份 LSP |
+| daemon + proxy | `mcp-language-server proxy --workspace X --lsp Y`（daemon 自动拉起，或手动 `daemon` 子命令） | 多进程客户端共享同一 workspace：全部客户端共用 1 份 LSP/watcher/搜索缓存，避免 N 份 clangd 导致 OOM。设计与验证见《docs/daemon-proxy-design.md》 |
+
 环境变量：
 
 | 变量 | 作用 | 默认 |

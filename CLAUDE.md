@@ -491,8 +491,19 @@ func SearchCacheKey(query, strategy, filePath, language, intent string) string {
 ## 命令行用法
 
 ```bash
+# 默认：独立 stdio 模式（单客户端，每客户端进程一份 LSP）
 mcp-language-server --workspace /path/to/project --lsp gopls
+
+# 多进程客户端共享模式（daemon + proxy，见 docs/daemon-proxy-design.md）
+mcp-language-server daemon --workspace /path/to/project --lsp clangd \
+    [--addr 127.0.0.1:0] [--idle-timeout 30m]   # 每 workspace 一个，独占 LSP
+mcp-language-server proxy  --workspace /path/to/project --lsp clangd
+    # 给 MCP client 当 stdio server 用；daemon 不存在时自动拉起
 ```
+
+**部署模式**：
+- **独立模式（默认）**：MCP client 通过 stdio 拉起本进程，1 客户端 = 1 本进程 = 1 份 LSP。
+- **daemon+proxy 模式**：多进程客户端共享同一个 workspace 时，daemon 独占 LSP/watcher/搜索缓存（回环 streamable HTTP，会话文件发现于 `~/.cache/mcp-language-server/`，无客户端 30 分钟自动退出）；proxy 是每客户端的轻量 stdio↔HTTP 桥，避免 N 份 LSP 导致 OOM。
 
 **环境变量**:
 - `LOG_LEVEL=DEBUG` - 详细日志
