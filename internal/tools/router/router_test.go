@@ -285,3 +285,35 @@ func TestByteOffsetOfLine(t *testing.T) {
 		t.Errorf("missing file: expected -1, got %d", got)
 	}
 }
+
+// A natural-language query routed to the AST layer (intent contains
+// "function") must degrade to text matches with a warning instead of
+// returning a hard CSP compile error.
+func TestIntentRoutedASTDegradesOnNonCSPQuery(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "main.c"), []byte("int natural_token_fn(void) {\n\treturn 0;\n}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	r := NewRouter(dir)
+	results, err := r.Search(context.Background(), SearchOptions{
+		Query:    "natural_token_fn",
+		Strategy: "auto",
+		Intent:   "function definition",
+	})
+	if err != nil {
+		t.Fatalf("search failed: %v", err)
+	}
+	if len(results) != 1 || results[0].Layer != "unified-ast" {
+		t.Fatalf("expected unified-ast layer, got %+v", results)
+	}
+	content := results[0].Content
+	for _, want := range []string{
+		"WARNING: query is not a valid tree-sitter CSP pattern",
+		"natural_token_fn",
+	} {
+		if !strings.Contains(content, want) {
+			t.Errorf("output missing %q, got:\n%s", want, content)
+		}
+	}
+}

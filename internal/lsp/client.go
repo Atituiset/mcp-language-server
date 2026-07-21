@@ -2,6 +2,7 @@ package lsp
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -12,38 +13,45 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/isaacphi/mcp-language-server/internal/protocol"
 )
 
 type Client struct {
-	Cmd *exec.Cmd
-	stdin io.WriteCloser
+	Cmd    *exec.Cmd
+	stdin  io.WriteCloser
 	stdout *bufio.Reader
 	stderr io.ReadCloser
+
+	// writeMu serializes stdin writes (header+body must stay atomic)
+	writeMu sync.Mutex
+
+	// dead is set when the read loop exits (process died or pipe closed)
+	dead atomic.Bool
 
 	// Request ID counter
 	nextID atomic.Int32
 
 	// Response handlers
-	handlers map[string]chan *Message
+	handlers   map[string]chan *Message
 	handlersMu sync.RWMutex
 
 	// Server request handlers
 	serverRequestHandlers map[string]ServerRequestHandler
-	serverHandlersMu sync.RWMutex
+	serverHandlersMu      sync.RWMutex
 
 	// Notification handlers
 	notificationHandlers map[string]NotificationHandler
-	notificationMu sync.RWMutex
+	notificationMu       sync.RWMutex
 
 	// Diagnostic cache
-	diagnostics map[protocol.DocumentUri][]protocol.Diagnostic
+	diagnostics   map[protocol.DocumentUri][]protocol.Diagnostic
 	diagnosticsMu sync.RWMutex
 
 	// Diagnostic waiters: callers of WaitForDiagnostics block until
 	// publishDiagnostics arrives for the requested URI or timeout expires.
-	diagWaiters map[protocol.DocumentUri][]chan struct{}
+	diagWaiters   map[protocol.DocumentUri][]chan struct{}
 	diagWaitersMu sync.Mutex
 
 	// Text document sync kind reported by the server during initialization.
@@ -51,7 +59,7 @@ type Client struct {
 	syncKind protocol.TextDocumentSyncKind
 
 	// Files are currently opened by the LSP
-	openFiles map[string]*OpenFileInfo
+	openFiles   map[string]*OpenFileInfo
 	openFilesMu sync.RWMutex
 }
 
@@ -76,16 +84,16 @@ func NewClient(command string, args ...string) (*Client, error) {
 	}
 
 	client := &Client{
-		Cmd: cmd,
-		stdin: stdin,
-		stdout: bufio.NewReader(stdout),
-		stderr: stderr,
-		handlers: make(map[string]chan *Message),
-		notificationHandlers: make(map[string]NotificationHandler),
+		Cmd:                   cmd,
+		stdin:                 stdin,
+		stdout:                bufio.NewReader(stdout),
+		stderr:                stderr,
+		handlers:              make(map[string]chan *Message),
+		notificationHandlers:  make(map[string]NotificationHandler),
 		serverRequestHandlers: make(map[string]ServerRequestHandler),
-		diagnostics: make(map[protocol.DocumentUri][]protocol.Diagnostic),
-		diagWaiters: make(map[protocol.DocumentUri][]chan struct{}),
-		openFiles: make(map[string]*OpenFileInfo),
+		diagnostics:           make(map[protocol.DocumentUri][]protocol.Diagnostic),
+		diagWaiters:           make(map[protocol.DocumentUri][]chan struct{}),
+		openFiles:             make(map[string]*OpenFileInfo),
 	}
 
 	// Start the LSP server process
@@ -109,6 +117,40 @@ func NewClient(command string, args ...string) (*Client, error) {
 	go client.handleMessages()
 
 	return client, nil
+}
+
+// Alive reports whether the LSP connection is still usable. It turns false
+// once the read loop exits (server process died or closed the pipe).
+func (c *Client) Alive() bool {
+	return !c.dead.Load()
+}
+
+// markDead flags the connection as closed so subsequent Call/Notify fail fast
+// instead of blocking on a response that will never arrive.
+func (c *Client) markDead() {
+	c.dead.Store(true)
+}
+
+// failPendingRequests unblocks every in-flight Call with an error, so tool
+// handlers do not hang until their context times out after the server dies.
+func (c *Client) failPendingRequests(cause error) {
+	c.handlersMu.Lock()
+	defer c.handlersMu.Unlock()
+	for id, ch := range c.handlers {
+		msg := &Message{
+			JSONRPC: "2.0",
+			Error: &ResponseError{
+				Code:    -32001,
+				Message: fmt.Sprintf("LSP connection closed: %v", cause),
+			},
+		}
+		select {
+		case ch <- msg:
+		default:
+		}
+		close(ch)
+		delete(c.handlers, id)
+	}
 }
 
 func (c *Client) RegisterNotificationHandler(method string, handler NotificationHandler) {
@@ -138,7 +180,7 @@ func (c *Client) InitializeLSPClient(ctx context.Context, workspaceDir string) (
 			ProcessID: int32(os.Getpid()),
 			ClientInfo: &protocol.ClientInfo{
 				Name:    "mcp-language-server",
-				Version: "0.1.0",
+				Version: "0.3.0",
 			},
 			RootPath: workspaceDir,
 			RootURI:  protocol.URIFromPath(workspaceDir),
@@ -314,6 +356,9 @@ func (c *Client) WaitForServerReady(ctx context.Context) error {
 type OpenFileInfo struct {
 	Version int32
 	URI     protocol.DocumentUri
+	// Content is the document text last synced to the server, used to
+	// compute incremental changes.
+	Content []byte
 }
 
 func (c *Client) OpenFile(ctx context.Context, filepath string) error {
@@ -349,6 +394,7 @@ func (c *Client) OpenFile(ctx context.Context, filepath string) error {
 	c.openFiles[string(uri)] = &OpenFileInfo{
 		Version: 1,
 		URI:     protocol.DocumentUri(uri),
+		Content: content,
 	}
 	c.openFilesMu.Unlock()
 
@@ -374,12 +420,17 @@ func (c *Client) NotifyChange(ctx context.Context, filepath string) error {
 
 	fileInfo.Version++
 	version := fileInfo.Version
+	oldContent := fileInfo.Content
 	c.openFilesMu.Unlock()
 
 	var changes []protocol.TextDocumentContentChangeEvent
 
-	if c.syncKind == protocol.Incremental {
-		changes = computeIncrementalChanges(fileInfo, content)
+	if c.syncKind == protocol.Incremental && oldContent != nil {
+		changes = computeIncrementalChanges(oldContent, content)
+		if len(changes) == 0 {
+			// Content identical to the synced snapshot; nothing to send.
+			return nil
+		}
 	} else {
 		changes = []protocol.TextDocumentContentChangeEvent{
 			{
@@ -400,17 +451,93 @@ func (c *Client) NotifyChange(ctx context.Context, filepath string) error {
 		ContentChanges: changes,
 	}
 
-	return c.Notify(ctx, "textDocument/didChange", params)
+	if err := c.Notify(ctx, "textDocument/didChange", params); err != nil {
+		return err
+	}
+
+	c.openFilesMu.Lock()
+	fileInfo.Content = content
+	c.openFilesMu.Unlock()
+	return nil
 }
 
-func computeIncrementalChanges(fileInfo *OpenFileInfo, newContent []byte) []protocol.TextDocumentContentChangeEvent {
+// computeIncrementalChanges diffs old and new document contents and returns
+// a single ranged change covering the differing region (common prefix/suffix
+// trimmed). Region boundaries are backed off to UTF-8 rune starts so neither
+// the range nor the replacement text splits a rune. Positions use UTF-16
+// code units, the LSP default position encoding (this client does not
+// negotiate general.positionEncodings).
+func computeIncrementalChanges(oldContent, newContent []byte) []protocol.TextDocumentContentChangeEvent {
+	if bytes.Equal(oldContent, newContent) {
+		return nil
+	}
+
+	minLen := len(oldContent)
+	if len(newContent) < minLen {
+		minLen = len(newContent)
+	}
+
+	start := 0
+	for start < minLen && oldContent[start] == newContent[start] {
+		start++
+	}
+	end := 0
+	for end < minLen-start && oldContent[len(oldContent)-1-end] == newContent[len(newContent)-1-end] {
+		end++
+	}
+
+	// Back the boundaries off to rune starts. The shared prefix (old==new up
+	// to start) and shared suffix make a boundary valid for both contents.
+	for start > 0 && start < len(oldContent) && !utf8.RuneStart(oldContent[start]) {
+		start--
+	}
+	for end > 0 && !utf8.RuneStart(oldContent[len(oldContent)-end]) {
+		end--
+	}
+
+	if start == 0 && end == 0 {
+		// Nothing in common: a whole-document change is cheaper to encode.
+		return []protocol.TextDocumentContentChangeEvent{
+			{
+				Value: protocol.TextDocumentContentChangeWholeDocument{
+					Text: string(newContent),
+				},
+			},
+		}
+	}
+
+	oldEnd := len(oldContent) - end
+	newEnd := len(newContent) - end
 	return []protocol.TextDocumentContentChangeEvent{
 		{
-			Value: protocol.TextDocumentContentChangeWholeDocument{
-				Text: string(newContent),
+			Value: protocol.TextDocumentContentChangePartial{
+				Range: &protocol.Range{
+					Start: positionAt(oldContent, start),
+					End:   positionAt(oldContent, oldEnd),
+				},
+				Text: string(newContent[start:newEnd]),
 			},
 		},
 	}
+}
+
+// positionAt converts a byte offset into an LSP position: line is 0-based,
+// character counts UTF-16 code units since the last newline.
+func positionAt(content []byte, offset int) protocol.Position {
+	var line, char uint32
+	for i := 0; i < offset && i < len(content); {
+		r, size := utf8.DecodeRune(content[i:])
+		if r == '\n' {
+			line++
+			char = 0
+		} else if r > 0xFFFF {
+			char += 2 // surrogate pair in UTF-16
+		} else {
+			char++
+		}
+		i += size
+	}
+	return protocol.Position{Line: line, Character: char}
 }
 
 func (c *Client) CloseFile(ctx context.Context, filepath string) error {

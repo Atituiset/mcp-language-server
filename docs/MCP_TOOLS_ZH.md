@@ -4,7 +4,7 @@
 
 MCP Language Server 通过 JSON-RPC 2.0 协议提供代码上下文提取能力，支持 L1（文本）、L2（AST）、L3（符号）三层搜索架构。
 
-> **工具面（2026-07 起）**：默认仅注册 **9 个工具**——`search`、`definition`、`references`、`callers`、`callees`、`diagnostics`、`hover`、`edit_file`、`rename_symbol`。其余 8 个（`search_text`、`search_ast`、`search_symbol`、`ripgrep`、`treesitter_query`、`treesitter_ast`、`find_struct_usage`、`find_struct_definition`）为 debug 工具，仅当环境变量 **`MCP_LS_DEBUG_TOOLS=1`** 时注册。本文档保留全部 17 个工具的参考，debug 工具在各节标题处有标注。
+> **工具面（2026-07-20 起）**：默认仅注册 **7 个只读工具**——`search`、`definition`、`references`、`callers`、`callees`、`diagnostics`、`hover`（面向只读代码检视场景）。编辑工具 `edit_file`、`rename_symbol` 需 **`MCP_LS_ENABLE_EDITS=1`** 才注册；debug 工具（`search_text`、`search_ast`、`search_symbol`、`ripgrep`、`treesitter_query`、`treesitter_ast`、`find_struct_usage`、`find_struct_definition`）需 **`MCP_LS_DEBUG_TOOLS=1`**。本文档保留全部工具的参考，门控工具在各节标题处有标注。
 
 ---
 
@@ -338,7 +338,7 @@ void foo_bar()
 
 ---
 
-### 11. rename_symbol - 重命名符号
+### 11. rename_symbol - 重命名符号（编辑工具，需 `MCP_LS_ENABLE_EDITS=1`）
 
 重命名符号并更新所有引用。
 
@@ -385,7 +385,7 @@ No diagnostics found for src/main.cpp
 
 ---
 
-### 13. edit_file - 文本编辑
+### 13. edit_file - 文本编辑（编辑工具，需 `MCP_LS_ENABLE_EDITS=1`）
 
 对文件应用多重文本编辑。
 
@@ -532,7 +532,7 @@ REQ='{"jsonrpc":"2.0","id":17,"method":"tools/call","params":{"name":"treesitter
 
 ### 缓存与索引行为
 
-- 搜索缓存：5 分钟 TTL（`MCP_LS_CACHE_TTL` 秒数可调），键含 query/strategy/filePath/language/intent；任意文件变更全量失效（防抖 300ms）
+- 搜索缓存：5 分钟 TTL（`MCP_LS_CACHE_TTL` 秒数可调），键含 query/strategy/filePath/language/intent；watcher 按文件失效（反向索引，仅失效依赖该文件的条目，防抖 300ms）
 - 启动 warmup：服务启动后自动打开 compile_commands.json 的首个翻译单元，触发 clangd 后台索引（否则 clangd 在首个 didOpen 前不索引，符号层持续降级）
 - 符号层降级：LSP 不可用/无结果时降级 ripgrep，标注 `symbol-fallback-text` + WARNING；带 filePath 锚点时按 include 邻域（compile_commands.json 提取，剔除全局无区分度目录）限定范围
 

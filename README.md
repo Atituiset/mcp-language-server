@@ -173,8 +173,8 @@ This is an [MCP](https://modelcontextprotocol.io/introduction) server that runs 
 - `references`: Locates all usages and references of a symbol throughout the codebase.
 - `diagnostics`: Provides diagnostic information for a specific file, including warnings and errors.
 - `hover`: Display documentation, type hints, or other hover information for a given location.
-- `rename_symbol`: Rename a symbol across a project.
-- `edit_file`: Allows making multiple text edits to a file based on line numbers. Provides a more reliable and context-economical way to edit files compared to search and replace based edit tools.
+- `rename_symbol`: Rename a symbol across a project. (opt-in: registered only when `MCP_LS_ENABLE_EDITS` is set)
+- `edit_file`: Allows making multiple text edits to a file based on line numbers. Provides a more reliable and context-economical way to edit files compared to search and replace based edit tools. (opt-in: `MCP_LS_ENABLE_EDITS`)
 
 ## About
 

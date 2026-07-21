@@ -100,8 +100,8 @@ func (w *WorkspaceWatcher) AddRegistrations(ctx context.Context, id string, watc
 
 			// Test match against some example paths
 			testPaths := []string{
-				"/Users/phil/dev/mcp-language-server/internal/watcher/watcher.go",
-				"/Users/phil/dev/mcp-language-server/go.mod",
+				filepath.Join(w.workspacePath, "example/src/main.go"),
+				filepath.Join(w.workspacePath, "example/go.mod"),
 			}
 
 			for _, testPath := range testPaths {

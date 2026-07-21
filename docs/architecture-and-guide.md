@@ -1,8 +1,9 @@
 # MCP Language Server 架构与扩展指南
 
 > 刷新版，2026-07-17，基于 commit `be40c6f`（main）。
-> 本文取代旧版《架构深度分析与使用指南》：旧文描述的"17 工具全量注册 + searchAll 三层拼接"架构已被重写，当前为"9+8 工具面 + CodeAtom IR 归一化管道"。
-> 配套文档：工具参考《docs/MCP_TOOLS_ZH.md》、优化方案《docs/tools-opt.md》、IR 设计《docs/code-atom-ir.md》、压测《docs/benchmark-2026-07-17.md》、待办《docs/optimization-backlog.md》。
+> 2026-07-20 更新：工具面改为条件注册——默认 7 个只读工具，`edit_file`/`rename_symbol` 由 `MCP_LS_ENABLE_EDITS` 门控（§3.2）；缓存按文件失效走反向索引（§3.7）。
+> 本文取代旧版《架构深度分析与使用指南》：旧文描述的"17 工具全量注册 + searchAll 三层拼接"架构已被重写，当前为"条件注册工具面 + CodeAtom IR 归一化管道"。
+> 配套文档：工具参考《docs/MCP_TOOLS_ZH.md》、优化方案《docs/tools-opt.md》、IR 设计《docs/code-atom-ir.md》、设计思路深入解析《docs/design-deep-dive.md》、压测《docs/benchmark-2026-07-17.md》、待办《docs/optimization-backlog.md》。
 
 ---
 
@@ -20,7 +21,8 @@ mcp-language-server --workspace <repo> --lsp clangd [-- <lsp-args>]
 
 | 变量 | 作用 | 默认 |
 |------|------|------|
-| `MCP_LS_DEBUG_TOOLS` | 非空时注册全部 17 个工具 | 只注册 9 个 |
+| `MCP_LS_DEBUG_TOOLS` | 非空时追加注册 8 个 debug 工具 | 不注册 |
+| `MCP_LS_ENABLE_EDITS` | 非空时注册 `edit_file`/`rename_symbol` | 不注册（只读检视面） |
 | `MCP_LS_CACHE_TTL` | 搜索缓存 TTL（秒） | 300 |
 
 ---
@@ -32,11 +34,13 @@ LLM (MCP client)
    │ stdio / NDJSON JSON-RPC
    ▼
 ┌─────────────────────────────────────────────────────────┐
-│ tools.go  registerTools()                               │
-│   9 个默认工具 + 8 个 debug 工具（MCP_LS_DEBUG_TOOLS）   │
+│ tools.go  registerTools()                                │
+│   7 个默认只读工具（检视面）                              │
+│   +8 debug 工具（MCP_LS_DEBUG_TOOLS）                    │
+│   +2 编辑工具（MCP_LS_ENABLE_EDITS）                     │
 │   search ──────────────┐                                │
 │   definition/references/callers/callees/diagnostics/    │
-│   hover/rename_symbol/edit_file                         │
+│   hover                                               │
 └────────────────────────┼────────────────────────────────┘
                          ▼
               internal/tools/router (Router)
@@ -59,7 +63,7 @@ LLM (MCP client)
         watcher（fsnotify，300ms 防抖）→ Router.InvalidateFile
 ```
 
-关键设计取舍：**LLM 面对的选择题从 17 选 1 收敛到 9 选 1**，其中约 80% 场景应由 `search` 承接；确定性导航（已知名字看定义/引用/调用链）走 L3 单点工具；编辑走 `edit_file`/`rename_symbol`。
+关键设计取舍：**LLM 面对的选择题收敛到默认 7 选 1（只读检视面）**，其中约 80% 场景应由 `search` 承接；确定性导航（已知名字看定义/引用/调用链）走 L3 单点工具。编辑工具 `edit_file`/`rename_symbol` 默认不注册（`MCP_LS_ENABLE_EDITS` 开启）——安全检视场景下 LLM 误触发编辑是事故而非功能。
 
 ---
 
@@ -74,7 +78,7 @@ LLM (MCP client)
 
 ### 3.2 工具面（tools.go）
 
-**注册机制**：全部 17 个工具先定义并注册，末尾统一 `DeleteTools` 摘除 8 个 debug 工具（`MCP_LS_DEBUG_TOOLS` 非空时保留）。debug 工具：`search_text/search_ast/search_symbol/ripgrep/treesitter_query/treesitter_ast/find_struct_usage/find_struct_definition`——能力均被 `search`+strategy 覆盖，仅作调试逃生舱。
+**注册机制**：按环境变量条件注册（tools.go 中 `if debugTools` / `if editsEnabled` 分组）。默认 7 个只读工具；`MCP_LS_DEBUG_TOOLS` 非空时追加 8 个 debug 工具（`search_text/search_ast/search_symbol/ripgrep/treesitter_query/treesitter_ast/find_struct_usage/find_struct_definition`——能力均被 `search`+strategy 覆盖，仅作调试逃生舱）；`MCP_LS_ENABLE_EDITS` 非空时追加 `edit_file`/`rename_symbol`。
 
 **description 原则**：触发式（"当需要 X 时用我；不要用 Y 场景"），`search` 声明为默认首选入口，`definition`/`references` 定位为结果不精确时的精确化手段。
 

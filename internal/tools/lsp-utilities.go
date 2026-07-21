@@ -10,8 +10,14 @@ import (
 	"github.com/isaacphi/mcp-language-server/internal/protocol"
 )
 
+// documentSymbolClient is the subset of the LSP client GetFullDefinition
+// needs; *lsp.Client satisfies it, and tests can stub it.
+type documentSymbolClient interface {
+	DocumentSymbol(ctx context.Context, params protocol.DocumentSymbolParams) (protocol.Or_Result_textDocument_documentSymbol, error)
+}
+
 // Gets the full code block surrounding the start of the input location
-func GetFullDefinition(ctx context.Context, client *lsp.Client, startLocation protocol.Location) (string, protocol.Location, error) {
+func GetFullDefinition(ctx context.Context, client documentSymbolClient, startLocation protocol.Location) (string, protocol.Location, error) {
 	symParams := protocol.DocumentSymbolParams{
 		TextDocument: protocol.TextDocumentIdentifier{
 			URI: startLocation.URI,

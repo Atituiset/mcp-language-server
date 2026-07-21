@@ -10,7 +10,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/isaacphi/mcp-language-server/internal/lsp"
 	"github.com/isaacphi/mcp-language-server/internal/protocol"
 	"github.com/isaacphi/mcp-language-server/internal/tools"
 	"github.com/isaacphi/mcp-language-server/internal/tools/atom"
@@ -18,12 +17,25 @@ import (
 	"github.com/isaacphi/mcp-language-server/internal/tools/treesitter"
 )
 
+// symbolClient is the subset of the LSP client the router depends on.
+// *lsp.Client satisfies it; tests can stub it.
+type symbolClient interface {
+	Symbol(ctx context.Context, params protocol.WorkspaceSymbolParams) (protocol.Or_Result_workspace_symbol, error)
+	OpenFile(ctx context.Context, path string) error
+	DocumentSymbol(ctx context.Context, params protocol.DocumentSymbolParams) (protocol.Or_Result_textDocument_documentSymbol, error)
+	// Alive reports whether the LSP connection is still usable (false once
+	// the server process dies), so fallbacks can state the real reason.
+	Alive() bool
+}
+
 type Router struct {
 	workspaceDir string
-	lspClient    *lsp.Client
+	lspClient    symbolClient
 	cache        *cache.SearchResultCache
-	includeOnce  sync.Once
-	includeMap   *tools.IncludeMap
+
+	includeMu     sync.Mutex
+	includeLoaded bool
+	includeMap    *tools.IncludeMap
 }
 
 type SearchOptions struct {
@@ -65,7 +77,7 @@ func NewRouterWithCache(workspaceDir string, cacheTTLSeconds int64) *Router {
 	}
 }
 
-func NewRouterWithClient(workspaceDir string, client *lsp.Client, cacheTTLSeconds ...int64) *Router {
+func NewRouterWithClient(workspaceDir string, client symbolClient, cacheTTLSeconds ...int64) *Router {
 	ttl := int64(defaultCacheTTL)
 	if len(cacheTTLSeconds) > 0 && cacheTTLSeconds[0] > 0 {
 		ttl = cacheTTLSeconds[0]
@@ -179,12 +191,34 @@ func (r *Router) resultFiles(atoms []atom.CodeAtom) []string {
 
 // getIncludeMap lazily loads the compile_commands.json include mapping.
 func (r *Router) getIncludeMap() *tools.IncludeMap {
-	r.includeOnce.Do(func() {
+	r.includeMu.Lock()
+	defer r.includeMu.Unlock()
+	if !r.includeLoaded {
+		r.includeLoaded = true
 		if m, err := tools.LoadIncludeMap(r.workspaceDir); err == nil && m.Size() > 0 {
 			r.includeMap = m
 		}
-	})
+	}
 	return r.includeMap
+}
+
+// InvalidateIncludeMap drops the cached include map so the next scoped
+// search re-reads compile_commands.json (called when the watcher reports
+// a change to it, e.g. after a reconfigure).
+func (r *Router) InvalidateIncludeMap() {
+	r.includeMu.Lock()
+	defer r.includeMu.Unlock()
+	r.includeMap = nil
+	r.includeLoaded = false
+}
+
+// lspFallbackWarning describes why symbol-layer results fell back to plain
+// text matches: the server process died, or it is simply unavailable.
+func (r *Router) lspFallbackWarning() string {
+	if r.lspClient != nil && !r.lspClient.Alive() {
+		return "WARNING: LSP server process exited, results are plain text matches"
+	}
+	return "WARNING: LSP unavailable, results are plain text matches"
 }
 
 // scopedRipgrepOptions narrows a ripgrep invocation to the include
@@ -284,7 +318,7 @@ func (r *Router) searchAST(ctx context.Context, opts SearchOptions) ([]SearchRes
 }
 
 func (r *Router) searchSymbol(ctx context.Context, opts SearchOptions) ([]SearchResult, error) {
-	if r.lspClient != nil {
+	if r.lspClient != nil && r.lspClient.Alive() {
 		result, err := r.lspClient.Symbol(ctx, protocol.WorkspaceSymbolParams{Query: opts.Query})
 		if err == nil {
 			symbols, parseErr := result.Results()
@@ -305,7 +339,7 @@ func (r *Router) searchSymbol(ctx context.Context, opts SearchOptions) ([]Search
 	if err != nil {
 		return nil, err
 	}
-	content := "WARNING: LSP unavailable, results are plain text matches"
+	content := r.lspFallbackWarning()
 	if scoped > 0 {
 		content += fmt.Sprintf(" (scoped to %d files via include map)", scoped)
 	}
@@ -358,10 +392,29 @@ func (r *Router) searchLayerUnified(ctx context.Context, opts SearchOptions, lay
 			language = "cpp"
 		}
 		results, err := tools.RunTreesitterQueryResults(ctx, r.workspaceDir, opts.Query, opts.FilePath, language)
-		if err != nil {
-			return nil, err
+		if err == nil {
+			atoms = atomsFromTreeSitter(results)
+			break
 		}
-		atoms = atomsFromTreeSitter(results)
+		// A natural-language query (e.g. intent="function definition" with a
+		// plain symbol name) is not a valid CSP pattern — degrade to text
+		// matches instead of failing the search, mirroring the symbol
+		// layer's LSP fallback.
+		rgOpts, _ := r.textRipgrepOptions(opts, tools.RipgrepOptions{
+			MaxCount:      opts.MaxCount,
+			ContextLines:  opts.ContextLines,
+			CaseSensitive: opts.CaseSensitive,
+			WholeWord:     opts.WholeWord,
+		})
+		if rgOpts.MaxCount <= 0 {
+			rgOpts.MaxCount = 100
+		}
+		matches, rgErr := tools.SearchCodeMatches(ctx, r.workspaceDir, opts.Query, rgOpts)
+		if rgErr != nil {
+			return nil, rgErr
+		}
+		atoms = atomsFromTextMatches(matches, "rg(ast-fallback)", exp)
+		warning = "WARNING: query is not a valid tree-sitter CSP pattern, results are plain text matches"
 	case "symbol":
 		symbols, fallback, err := r.querySymbols(ctx, opts.Query)
 		if err != nil {
@@ -378,7 +431,7 @@ func (r *Router) searchLayerUnified(ctx context.Context, opts SearchOptions, lay
 				return nil, fbErr
 			}
 			atoms = append(atoms, atomsFromTextMatches(fbMatches, "rg(lsp-fallback)", exp)...)
-			warning = "WARNING: LSP unavailable, results are plain text matches"
+			warning = r.lspFallbackWarning()
 			if scoped > 0 {
 				warning += fmt.Sprintf(" (scoped to %d files via include map)", scoped)
 			}
@@ -516,7 +569,7 @@ func (r *Router) searchAll(ctx context.Context, opts SearchOptions) ([]SearchRes
 
 	content := atom.Render(kept, stats)
 	if symbolFallback {
-		warning := "WARNING: LSP unavailable, results are plain text matches"
+		warning := r.lspFallbackWarning()
 		if fallbackScoped > 0 {
 			warning += fmt.Sprintf(" (scoped to %d files via include map)", fallbackScoped)
 		}
@@ -530,7 +583,7 @@ func (r *Router) searchAll(ctx context.Context, opts SearchOptions) ([]SearchRes
 // means the symbol layer is unavailable (no client, error, or empty) and
 // the caller should degrade to text search.
 func (r *Router) querySymbols(ctx context.Context, query string) ([]protocol.WorkspaceSymbolResult, bool, error) {
-	if r.lspClient != nil {
+	if r.lspClient != nil && r.lspClient.Alive() {
 		result, err := r.lspClient.Symbol(ctx, protocol.WorkspaceSymbolParams{Query: query})
 		if err != nil {
 			return nil, false, err

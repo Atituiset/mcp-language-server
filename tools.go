@@ -15,91 +15,97 @@ func (s *mcpServer) registerTools() error {
 	coreLogger.Debug("Registering MCP tools")
 
 	debugTools := os.Getenv("MCP_LS_DEBUG_TOOLS") != ""
+	// Edit tools (edit_file, rename_symbol) are registered only when
+	// explicitly enabled: the primary use case is read-only code
+	// inspection, and an LLM-triggered edit is an incident there.
+	editsEnabled := os.Getenv("MCP_LS_ENABLE_EDITS") != ""
 
-	applyTextEditTool := mcp.NewTool("edit_file",
-		mcp.WithDescription("Use to apply precise line-range text replacements in a file. startLine/endLine are 1-indexed and inclusive; leave newText empty to delete lines."),
-		mcp.WithArray("edits",
-			mcp.Required(),
-			mcp.Description("List of edits to apply"),
-			mcp.Items(map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"startLine": map[string]any{
-						"type":        "number",
-						"description": "Start line to replace, inclusive, one-indexed",
+	if editsEnabled {
+		applyTextEditTool := mcp.NewTool("edit_file",
+			mcp.WithDescription("Use to apply precise line-range text replacements in a file. startLine/endLine are 1-indexed and inclusive; leave newText empty to delete lines."),
+			mcp.WithArray("edits",
+				mcp.Required(),
+				mcp.Description("List of edits to apply"),
+				mcp.Items(map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"startLine": map[string]any{
+							"type":        "number",
+							"description": "Start line to replace, inclusive, one-indexed",
+						},
+						"endLine": map[string]any{
+							"type":        "number",
+							"description": "End line to replace, inclusive, one-indexed",
+						},
+						"newText": map[string]any{
+							"type":        "string",
+							"description": "Replacement text. Replace with the new text. Leave blank to remove lines.",
+						},
 					},
-					"endLine": map[string]any{
-						"type":        "number",
-						"description": "End line to replace, inclusive, one-indexed",
-					},
-					"newText": map[string]any{
-						"type":        "string",
-						"description": "Replacement text. Replace with the new text. Leave blank to remove lines.",
-					},
-				},
-				"required": []string{"startLine", "endLine"},
-			}),
-		),
-		mcp.WithString("filePath",
-			mcp.Required(),
-			mcp.Description("Path to the file to edit"),
-		),
-	)
+					"required": []string{"startLine", "endLine"},
+				}),
+			),
+			mcp.WithString("filePath",
+				mcp.Required(),
+				mcp.Description("Path to the file to edit"),
+			),
+		)
 
-	s.mcpServer.AddTool(applyTextEditTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		args := request.GetArguments()
-		// Extract arguments
-		filePath, ok := args["filePath"].(string)
-		if !ok {
-			return mcp.NewToolResultError("filePath must be a string"), nil
-		}
-
-		// Extract edits array
-		editsArg, ok := args["edits"]
-		if !ok {
-			return mcp.NewToolResultError("edits is required"), nil
-		}
-
-		// Type assert and convert the edits
-		editsArray, ok := editsArg.([]any)
-		if !ok {
-			return mcp.NewToolResultError("edits must be an array"), nil
-		}
-
-		var edits []tools.TextEdit
-		for _, editItem := range editsArray {
-			editMap, ok := editItem.(map[string]any)
+		s.mcpServer.AddTool(applyTextEditTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			args := request.GetArguments()
+			// Extract arguments
+			filePath, ok := args["filePath"].(string)
 			if !ok {
-				return mcp.NewToolResultError("each edit must be an object"), nil
+				return mcp.NewToolResultError("filePath must be a string"), nil
 			}
 
-			startLine, ok := editMap["startLine"].(float64)
+			// Extract edits array
+			editsArg, ok := args["edits"]
 			if !ok {
-				return mcp.NewToolResultError("startLine must be a number"), nil
+				return mcp.NewToolResultError("edits is required"), nil
 			}
 
-			endLine, ok := editMap["endLine"].(float64)
+			// Type assert and convert the edits
+			editsArray, ok := editsArg.([]any)
 			if !ok {
-				return mcp.NewToolResultError("endLine must be a number"), nil
+				return mcp.NewToolResultError("edits must be an array"), nil
 			}
 
-			newText, _ := editMap["newText"].(string) // newText can be empty
+			var edits []tools.TextEdit
+			for _, editItem := range editsArray {
+				editMap, ok := editItem.(map[string]any)
+				if !ok {
+					return mcp.NewToolResultError("each edit must be an object"), nil
+				}
 
-			edits = append(edits, tools.TextEdit{
-				StartLine: int(startLine),
-				EndLine:   int(endLine),
-				NewText:   newText,
-			})
-		}
+				startLine, ok := editMap["startLine"].(float64)
+				if !ok {
+					return mcp.NewToolResultError("startLine must be a number"), nil
+				}
 
-		coreLogger.Debug("Executing edit_file for file: %s", filePath)
-		response, err := tools.ApplyTextEdits(s.ctx, s.lspClient, filePath, edits)
-		if err != nil {
-			coreLogger.Error("Failed to apply edits: %v", err)
-			return mcp.NewToolResultError(fmt.Sprintf("failed to apply edits: %v", err)), nil
-		}
-		return mcp.NewToolResultText(response), nil
-	})
+				endLine, ok := editMap["endLine"].(float64)
+				if !ok {
+					return mcp.NewToolResultError("endLine must be a number"), nil
+				}
+
+				newText, _ := editMap["newText"].(string) // newText can be empty
+
+				edits = append(edits, tools.TextEdit{
+					StartLine: int(startLine),
+					EndLine:   int(endLine),
+					NewText:   newText,
+				})
+			}
+
+			coreLogger.Debug("Executing edit_file for file: %s", filePath)
+			response, err := tools.ApplyTextEdits(s.ctx, s.lspClient, filePath, edits)
+			if err != nil {
+				coreLogger.Error("Failed to apply edits: %v", err)
+				return mcp.NewToolResultError(fmt.Sprintf("failed to apply edits: %v", err)), nil
+			}
+			return mcp.NewToolResultText(response), nil
+		})
+	}
 
 	readDefinitionTool := mcp.NewTool("definition",
 		mcp.WithDescription("Use when you already know a symbol's name and need its complete implementation source code. Do NOT use for exploratory or fuzzy search — use search first."),
@@ -152,7 +158,7 @@ func (s *mcpServer) registerTools() error {
 	})
 
 	getDiagnosticsTool := mcp.NewTool("diagnostics",
-		mcp.WithDescription("Use after editing a file to check compiler errors and warnings reported by the language server. Requires an exact filePath; do NOT use for files you have not opened or edited."),
+		mcp.WithDescription("Use to get compiler errors and warnings the language server reports for a file — e.g. spotting known issues in code under review, or checking a file after an edit. Requires an exact filePath."),
 		mcp.WithString("filePath",
 			mcp.Required(),
 			mcp.Description("The path to the file to get diagnostics for"),
@@ -197,71 +203,6 @@ func (s *mcpServer) registerTools() error {
 		text := tools.FormatDiagnosticsData(data, showLineNumbers)
 		return newAppToolResult(data, text, "ui://diagnostics/dashboard"), nil
 	})
-
-	// Uncomment to add codelens tools
-	//
-	// getCodeLensTool := mcp.NewTool("get_codelens",
-	// 	mcp.WithDescription("Get code lens hints for a given file from the language server."),
-	// 	mcp.WithString("filePath",
-	// 		mcp.Required(),
-	// 		mcp.Description("The path to the file to get code lens information for"),
-	// 	),
-	// )
-	//
-	// s.mcpServer.AddTool(getCodeLensTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	// 	// Extract arguments
-	// 	filePath, ok := request.Params.Arguments["filePath"].(string)
-	// 	if !ok {
-	// 		return mcp.NewToolResultError("filePath must be a string"), nil
-	// 	}
-	//
-	// 	coreLogger.Debug("Executing get_codelens for file: %s", filePath)
-	// 	text, err := tools.GetCodeLens(s.ctx, s.lspClient, filePath)
-	// 	if err != nil {
-	// 		coreLogger.Error("Failed to get code lens: %v", err)
-	// 		return mcp.NewToolResultError(fmt.Sprintf("failed to get code lens: %v", err)), nil
-	// 	}
-	// 	return mcp.NewToolResultText(text), nil
-	// })
-	//
-	// executeCodeLensTool := mcp.NewTool("execute_codelens",
-	// 	mcp.WithDescription("Execute a code lens command for a given file and lens index."),
-	// 	mcp.WithString("filePath",
-	// 		mcp.Required(),
-	// 		mcp.Description("The path to the file containing the code lens to execute"),
-	// 	),
-	// 	mcp.WithNumber("index",
-	// 		mcp.Required(),
-	// 		mcp.Description("The index of the code lens to execute (from get_codelens output), 1 indexed"),
-	// 	),
-	// )
-	//
-	// s.mcpServer.AddTool(executeCodeLensTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	// 	// Extract arguments
-	// 	filePath, ok := request.Params.Arguments["filePath"].(string)
-	// 	if !ok {
-	// 		return mcp.NewToolResultError("filePath must be a string"), nil
-	// 	}
-	//
-	// 	// Handle both float64 and int for index due to JSON parsing
-	// 	var index int
-	// 	switch v := request.Params.Arguments["index"].(type) {
-	// 	case float64:
-	// 		index = int(v)
-	// 	case int:
-	// 		index = v
-	// 	default:
-	// 		return mcp.NewToolResultError("index must be a number"), nil
-	// 	}
-	//
-	// 	coreLogger.Debug("Executing execute_codelens for file: %s index: %d", filePath, index)
-	// 	text, err := tools.ExecuteCodeLens(s.ctx, s.lspClient, filePath, index)
-	// 	if err != nil {
-	// 		coreLogger.Error("Failed to execute code lens: %v", err)
-	// 		return mcp.NewToolResultError(fmt.Sprintf("failed to execute code lens: %v", err)), nil
-	// 	}
-	// 	return mcp.NewToolResultText(text), nil
-	// })
 
 	hoverTool := mcp.NewTool("hover",
 		mcp.WithDescription("Use when you need the type signature or documentation of the symbol at a known file:line:column position. Do NOT use when you only know a name — use definition or search."),
@@ -316,210 +257,214 @@ func (s *mcpServer) registerTools() error {
 		return mcp.NewToolResultText(text), nil
 	})
 
-	renameSymbolTool := mcp.NewTool("rename_symbol",
-		mcp.WithDescription("Use to rename a symbol at a known file:line:column position and update all references codebase-wide. Requires the exact position of the symbol."),
-		mcp.WithString("filePath",
-			mcp.Required(),
-			mcp.Description("The path to the file containing the symbol to rename"),
-		),
-		mcp.WithNumber("line",
-			mcp.Required(),
-			mcp.Description("The line number where the symbol is located (1-indexed)"),
-		),
-		mcp.WithNumber("column",
-			mcp.Required(),
-			mcp.Description("The column number where the symbol is located (1-indexed)"),
-		),
-		mcp.WithString("newName",
-			mcp.Required(),
-			mcp.Description("The new name for the symbol"),
-		),
-	)
+	if editsEnabled {
+		renameSymbolTool := mcp.NewTool("rename_symbol",
+			mcp.WithDescription("Use to rename a symbol at a known file:line:column position and update all references codebase-wide. Requires the exact position of the symbol."),
+			mcp.WithString("filePath",
+				mcp.Required(),
+				mcp.Description("The path to the file containing the symbol to rename"),
+			),
+			mcp.WithNumber("line",
+				mcp.Required(),
+				mcp.Description("The line number where the symbol is located (1-indexed)"),
+			),
+			mcp.WithNumber("column",
+				mcp.Required(),
+				mcp.Description("The column number where the symbol is located (1-indexed)"),
+			),
+			mcp.WithString("newName",
+				mcp.Required(),
+				mcp.Description("The new name for the symbol"),
+			),
+		)
 
-	s.mcpServer.AddTool(renameSymbolTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		args := request.GetArguments()
-		// Extract arguments
-		filePath, ok := args["filePath"].(string)
-		if !ok {
-			return mcp.NewToolResultError("filePath must be a string"), nil
-		}
+		s.mcpServer.AddTool(renameSymbolTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			args := request.GetArguments()
+			// Extract arguments
+			filePath, ok := args["filePath"].(string)
+			if !ok {
+				return mcp.NewToolResultError("filePath must be a string"), nil
+			}
 
-		newName, ok := args["newName"].(string)
-		if !ok {
-			return mcp.NewToolResultError("newName must be a string"), nil
-		}
+			newName, ok := args["newName"].(string)
+			if !ok {
+				return mcp.NewToolResultError("newName must be a string"), nil
+			}
 
-		// Handle both float64 and int for line and column due to JSON parsing
-		var line, column int
-		switch v := args["line"].(type) {
-		case float64:
-			line = int(v)
-		case int:
-			line = v
-		default:
-			return mcp.NewToolResultError("line must be a number"), nil
-		}
+			// Handle both float64 and int for line and column due to JSON parsing
+			var line, column int
+			switch v := args["line"].(type) {
+			case float64:
+				line = int(v)
+			case int:
+				line = v
+			default:
+				return mcp.NewToolResultError("line must be a number"), nil
+			}
 
-		switch v := args["column"].(type) {
-		case float64:
-			column = int(v)
-		case int:
-			column = v
-		default:
-			return mcp.NewToolResultError("column must be a number"), nil
-		}
+			switch v := args["column"].(type) {
+			case float64:
+				column = int(v)
+			case int:
+				column = v
+			default:
+				return mcp.NewToolResultError("column must be a number"), nil
+			}
 
-		coreLogger.Debug("Executing rename_symbol for file: %s line: %d column: %d newName: %s", filePath, line, column, newName)
-		text, err := tools.RenameSymbol(s.ctx, s.lspClient, filePath, line, column, newName)
-		if err != nil {
-			coreLogger.Error("Failed to rename symbol: %v", err)
-			return mcp.NewToolResultError(fmt.Sprintf("failed to rename symbol: %v", err)), nil
-		}
-		return mcp.NewToolResultText(text), nil
-	})
+			coreLogger.Debug("Executing rename_symbol for file: %s line: %d column: %d newName: %s", filePath, line, column, newName)
+			text, err := tools.RenameSymbol(s.ctx, s.lspClient, filePath, line, column, newName)
+			if err != nil {
+				coreLogger.Error("Failed to rename symbol: %v", err)
+				return mcp.NewToolResultError(fmt.Sprintf("failed to rename symbol: %v", err)), nil
+			}
+			return mcp.NewToolResultText(text), nil
+		})
+	}
 
-	ripgrepTool := mcp.NewTool("ripgrep",
-		mcp.WithDescription("Search for text patterns in files using ripgrep. Faster than LSP-based search but does not understand language semantics."),
-		mcp.WithString("pattern",
-			mcp.Required(),
-			mcp.Description("The regex pattern to search for"),
-		),
-		mcp.WithBoolean("caseSensitive",
-			mcp.Description("Case sensitive search (default: false)"),
-		),
-		mcp.WithBoolean("wholeWord",
-			mcp.Description("Match whole words only (default: false)"),
-		),
-		mcp.WithNumber("maxCount",
-			mcp.Description("Maximum number of matches per file (default: 100)"),
-		),
-		mcp.WithNumber("contextLines",
-			mcp.Description("Number of context lines around matches (default: 0)"),
-		),
-		mcp.WithString("fileType",
-			mcp.Description("Filter by file type (e.g., go, py, js, ts)"),
-		),
-		mcp.WithString("include",
-			mcp.Description("Glob pattern to include files (e.g., *.go)"),
-		),
-	)
+	if debugTools {
+		ripgrepTool := mcp.NewTool("ripgrep",
+			mcp.WithDescription("Search for text patterns in files using ripgrep. Faster than LSP-based search but does not understand language semantics."),
+			mcp.WithString("pattern",
+				mcp.Required(),
+				mcp.Description("The regex pattern to search for"),
+			),
+			mcp.WithBoolean("caseSensitive",
+				mcp.Description("Case sensitive search (default: false)"),
+			),
+			mcp.WithBoolean("wholeWord",
+				mcp.Description("Match whole words only (default: false)"),
+			),
+			mcp.WithNumber("maxCount",
+				mcp.Description("Maximum number of matches per file (default: 100)"),
+			),
+			mcp.WithNumber("contextLines",
+				mcp.Description("Number of context lines around matches (default: 0)"),
+			),
+			mcp.WithString("fileType",
+				mcp.Description("Filter by file type (e.g., go, py, js, ts)"),
+			),
+			mcp.WithString("include",
+				mcp.Description("Glob pattern to include files (e.g., *.go)"),
+			),
+		)
 
-	s.mcpServer.AddTool(ripgrepTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		args := request.GetArguments()
-		pattern, ok := args["pattern"].(string)
-		if !ok {
-			return mcp.NewToolResultError("pattern must be a string"), nil
-		}
+		s.mcpServer.AddTool(ripgrepTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			args := request.GetArguments()
+			pattern, ok := args["pattern"].(string)
+			if !ok {
+				return mcp.NewToolResultError("pattern must be a string"), nil
+			}
 
-		opts := tools.RipgrepOptions{
-			MaxCount: 100,
-		}
+			opts := tools.RipgrepOptions{
+				MaxCount: 100,
+			}
 
-		if v, ok := args["caseSensitive"].(bool); ok {
-			opts.CaseSensitive = v
-		}
-		if v, ok := args["wholeWord"].(bool); ok {
-			opts.WholeWord = v
-		}
-		if v, ok := args["maxCount"].(float64); ok {
-			opts.MaxCount = int(v)
-		}
-		if v, ok := args["contextLines"].(float64); ok {
-			opts.ContextLines = int(v)
-		}
-		if v, ok := args["fileType"].(string); ok {
-			opts.FileType = v
-		}
-		if v, ok := args["include"].(string); ok {
-			opts.Include = v
-		}
+			if v, ok := args["caseSensitive"].(bool); ok {
+				opts.CaseSensitive = v
+			}
+			if v, ok := args["wholeWord"].(bool); ok {
+				opts.WholeWord = v
+			}
+			if v, ok := args["maxCount"].(float64); ok {
+				opts.MaxCount = int(v)
+			}
+			if v, ok := args["contextLines"].(float64); ok {
+				opts.ContextLines = int(v)
+			}
+			if v, ok := args["fileType"].(string); ok {
+				opts.FileType = v
+			}
+			if v, ok := args["include"].(string); ok {
+				opts.Include = v
+			}
 
-		coreLogger.Debug("Executing ripgrep for pattern: %s", pattern)
-		text, err := tools.SearchCode(s.ctx, s.config.workspaceDir, pattern, opts)
-		if err != nil {
-			coreLogger.Error("Failed to search: %v", err)
-			return mcp.NewToolResultError(fmt.Sprintf("failed to search: %v", err)), nil
-		}
-		return mcp.NewToolResultText(text), nil
-	})
+			coreLogger.Debug("Executing ripgrep for pattern: %s", pattern)
+			text, err := tools.SearchCode(s.ctx, s.config.workspaceDir, pattern, opts)
+			if err != nil {
+				coreLogger.Error("Failed to search: %v", err)
+				return mcp.NewToolResultError(fmt.Sprintf("failed to search: %v", err)), nil
+			}
+			return mcp.NewToolResultText(text), nil
+		})
 
-	treesitterQueryTool := mcp.NewTool("treesitter_query",
-		mcp.WithDescription("Query the AST using tree-sitter CSP patterns. Use this for structural pattern matching like finding all function definitions, specific AST node types, or complex tree patterns."),
-		mcp.WithString("query",
-			mcp.Required(),
-			mcp.Description("CSP query pattern (e.g., '(function_definition) @func' to find all functions)"),
-		),
-		mcp.WithString("filePath",
-			mcp.Description("Path to a specific file to query. If not provided, queries all C/C++ files in the workspace"),
-		),
-		mcp.WithString("language",
-			mcp.Description("Language: 'c' or 'cpp' (auto-detected from file extension if filePath provided)"),
-		),
-	)
+		treesitterQueryTool := mcp.NewTool("treesitter_query",
+			mcp.WithDescription("Query the AST using tree-sitter CSP patterns. Use this for structural pattern matching like finding all function definitions, specific AST node types, or complex tree patterns."),
+			mcp.WithString("query",
+				mcp.Required(),
+				mcp.Description("CSP query pattern (e.g., '(function_definition) @func' to find all functions)"),
+			),
+			mcp.WithString("filePath",
+				mcp.Description("Path to a specific file to query. If not provided, queries all C/C++ files in the workspace"),
+			),
+			mcp.WithString("language",
+				mcp.Description("Language: 'c' or 'cpp' (auto-detected from file extension if filePath provided)"),
+			),
+		)
 
-	s.mcpServer.AddTool(treesitterQueryTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		args := request.GetArguments()
-		query, ok := args["query"].(string)
-		if !ok {
-			return mcp.NewToolResultError("query must be a string"), nil
-		}
+		s.mcpServer.AddTool(treesitterQueryTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			args := request.GetArguments()
+			query, ok := args["query"].(string)
+			if !ok {
+				return mcp.NewToolResultError("query must be a string"), nil
+			}
 
-		var filePath, language string
-		if v, ok := args["filePath"].(string); ok {
-			filePath = v
-		}
-		if v, ok := args["language"].(string); ok {
-			language = v
-		}
+			var filePath, language string
+			if v, ok := args["filePath"].(string); ok {
+				filePath = v
+			}
+			if v, ok := args["language"].(string); ok {
+				language = v
+			}
 
-		coreLogger.Debug("Executing treesitter_query: %s", query)
-		text, err := tools.RunTreesitterQuery(s.ctx, s.config.workspaceDir, query, filePath, language)
-		if err != nil {
-			coreLogger.Error("Failed to run tree-sitter query: %v", err)
-			return mcp.NewToolResultError(fmt.Sprintf("failed to run query: %v", err)), nil
-		}
-		return mcp.NewToolResultText(text), nil
-	})
+			coreLogger.Debug("Executing treesitter_query: %s", query)
+			text, err := tools.RunTreesitterQuery(s.ctx, s.config.workspaceDir, query, filePath, language)
+			if err != nil {
+				coreLogger.Error("Failed to run tree-sitter query: %v", err)
+				return mcp.NewToolResultError(fmt.Sprintf("failed to run query: %v", err)), nil
+			}
+			return mcp.NewToolResultText(text), nil
+		})
 
-	treesitterASTTool := mcp.NewTool("treesitter_ast",
-		mcp.WithDescription("Get the AST (Abstract Syntax Tree) structure of a C/C++ file. Useful for exploring the syntactic structure and finding specific node types."),
-		mcp.WithString("filePath",
-			mcp.Required(),
-			mcp.Description("Path to the file to analyze"),
-		),
-		mcp.WithString("nodeType",
-			mcp.Description("Filter to only show nodes of this type (e.g., 'function_definition', 'struct_specifier')"),
-		),
-		mcp.WithNumber("maxDepth",
-			mcp.Description("Maximum tree depth to traverse (default: 10)"),
-		),
-	)
+		treesitterASTTool := mcp.NewTool("treesitter_ast",
+			mcp.WithDescription("Get the AST (Abstract Syntax Tree) structure of a C/C++ file. Useful for exploring the syntactic structure and finding specific node types."),
+			mcp.WithString("filePath",
+				mcp.Required(),
+				mcp.Description("Path to the file to analyze"),
+			),
+			mcp.WithString("nodeType",
+				mcp.Description("Filter to only show nodes of this type (e.g., 'function_definition', 'struct_specifier')"),
+			),
+			mcp.WithNumber("maxDepth",
+				mcp.Description("Maximum tree depth to traverse (default: 10)"),
+			),
+		)
 
-	s.mcpServer.AddTool(treesitterASTTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		args := request.GetArguments()
-		filePath, ok := args["filePath"].(string)
-		if !ok {
-			return mcp.NewToolResultError("filePath must be a string"), nil
-		}
+		s.mcpServer.AddTool(treesitterASTTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			args := request.GetArguments()
+			filePath, ok := args["filePath"].(string)
+			if !ok {
+				return mcp.NewToolResultError("filePath must be a string"), nil
+			}
 
-		var nodeType string
-		if v, ok := args["nodeType"].(string); ok {
-			nodeType = v
-		}
+			var nodeType string
+			if v, ok := args["nodeType"].(string); ok {
+				nodeType = v
+			}
 
-		maxDepth := 10
-		if v, ok := args["maxDepth"].(float64); ok {
-			maxDepth = int(v)
-		}
+			maxDepth := 10
+			if v, ok := args["maxDepth"].(float64); ok {
+				maxDepth = int(v)
+			}
 
-		coreLogger.Debug("Executing treesitter_ast for file: %s", filePath)
-		text, err := tools.GetAST(s.ctx, filePath, nodeType, maxDepth)
-		if err != nil {
-			coreLogger.Error("Failed to get AST: %v", err)
-			return mcp.NewToolResultError(fmt.Sprintf("failed to get AST: %v", err)), nil
-		}
-		return mcp.NewToolResultText(text), nil
-	})
+			coreLogger.Debug("Executing treesitter_ast for file: %s", filePath)
+			text, err := tools.GetAST(s.ctx, filePath, nodeType, maxDepth)
+			if err != nil {
+				coreLogger.Error("Failed to get AST: %v", err)
+				return mcp.NewToolResultError(fmt.Sprintf("failed to get AST: %v", err)), nil
+			}
+			return mcp.NewToolResultText(text), nil
+		})
+	}
 
 	// Unified search router
 	searchRouter := s.searchRouter
@@ -604,101 +549,103 @@ func (s *mcpServer) registerTools() error {
 	})
 
 	// Explicit layer tools (for code dispatch)
-	searchTextTool := mcp.NewTool("search_text",
-		mcp.WithDescription("Force L1 text search using ripgrep. Use for text patterns, TODO comments, strings."),
-		mcp.WithString("query",
-			mcp.Required(),
-			mcp.Description("Text pattern or regex to search"),
-		),
-		mcp.WithString("filePath",
-			mcp.Description("Limit to specific file"),
-		),
-	)
+	if debugTools {
+		searchTextTool := mcp.NewTool("search_text",
+			mcp.WithDescription("Force L1 text search using ripgrep. Use for text patterns, TODO comments, strings."),
+			mcp.WithString("query",
+				mcp.Required(),
+				mcp.Description("Text pattern or regex to search"),
+			),
+			mcp.WithString("filePath",
+				mcp.Description("Limit to specific file"),
+			),
+		)
 
-	s.mcpServer.AddTool(searchTextTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		args := request.GetArguments()
-		query, ok := args["query"].(string)
-		if !ok {
-			return mcp.NewToolResultError("query must be a string"), nil
-		}
+		s.mcpServer.AddTool(searchTextTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			args := request.GetArguments()
+			query, ok := args["query"].(string)
+			if !ok {
+				return mcp.NewToolResultError("query must be a string"), nil
+			}
 
-		opts := router.SearchOptions{Query: query, Strategy: "text"}
-		if v, ok := args["filePath"].(string); ok {
-			opts.FilePath = v
-		}
+			opts := router.SearchOptions{Query: query, Strategy: "text"}
+			if v, ok := args["filePath"].(string); ok {
+				opts.FilePath = v
+			}
 
-		results, err := searchRouter.Search(ctx, opts)
-		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("search failed: %v", err)), nil
-		}
-		return formatSearchResults(results), nil
-	})
+			results, err := searchRouter.Search(ctx, opts)
+			if err != nil {
+				return mcp.NewToolResultError(fmt.Sprintf("search failed: %v", err)), nil
+			}
+			return formatSearchResults(results), nil
+		})
 
-	searchASTTool := mcp.NewTool("search_ast",
-		mcp.WithDescription("Force L2 AST search using tree-sitter. Use for structural patterns, function definitions, AST node types."),
-		mcp.WithString("query",
-			mcp.Required(),
-			mcp.Description("CSP query pattern (e.g., '(function_definition) @func')"),
-		),
-		mcp.WithString("filePath",
-			mcp.Description("Limit to specific file"),
-		),
-		mcp.WithString("language",
-			mcp.Description("Language: 'c' or 'cpp'"),
-		),
-	)
+		searchASTTool := mcp.NewTool("search_ast",
+			mcp.WithDescription("Force L2 AST search using tree-sitter. Use for structural patterns, function definitions, AST node types."),
+			mcp.WithString("query",
+				mcp.Required(),
+				mcp.Description("CSP query pattern (e.g., '(function_definition) @func')"),
+			),
+			mcp.WithString("filePath",
+				mcp.Description("Limit to specific file"),
+			),
+			mcp.WithString("language",
+				mcp.Description("Language: 'c' or 'cpp'"),
+			),
+		)
 
-	s.mcpServer.AddTool(searchASTTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		args := request.GetArguments()
-		query, ok := args["query"].(string)
-		if !ok {
-			return mcp.NewToolResultError("query must be a string"), nil
-		}
+		s.mcpServer.AddTool(searchASTTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			args := request.GetArguments()
+			query, ok := args["query"].(string)
+			if !ok {
+				return mcp.NewToolResultError("query must be a string"), nil
+			}
 
-		opts := router.SearchOptions{Query: query, Strategy: "ast"}
-		if v, ok := args["filePath"].(string); ok {
-			opts.FilePath = v
-		}
-		if v, ok := args["language"].(string); ok {
-			opts.Language = v
-		}
+			opts := router.SearchOptions{Query: query, Strategy: "ast"}
+			if v, ok := args["filePath"].(string); ok {
+				opts.FilePath = v
+			}
+			if v, ok := args["language"].(string); ok {
+				opts.Language = v
+			}
 
-		results, err := searchRouter.Search(ctx, opts)
-		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("search failed: %v", err)), nil
-		}
-		return formatSearchResults(results), nil
-	})
+			results, err := searchRouter.Search(ctx, opts)
+			if err != nil {
+				return mcp.NewToolResultError(fmt.Sprintf("search failed: %v", err)), nil
+			}
+			return formatSearchResults(results), nil
+		})
 
-	searchSymbolTool := mcp.NewTool("search_symbol",
-		mcp.WithDescription("Force L3 symbol search using LSP. Use for symbol definitions, references, and semantic understanding."),
-		mcp.WithString("query",
-			mcp.Required(),
-			mcp.Description("Symbol name to search"),
-		),
-		mcp.WithString("filePath",
-			mcp.Description("Limit to specific file"),
-		),
-	)
+		searchSymbolTool := mcp.NewTool("search_symbol",
+			mcp.WithDescription("Force L3 symbol search using LSP. Use for symbol definitions, references, and semantic understanding."),
+			mcp.WithString("query",
+				mcp.Required(),
+				mcp.Description("Symbol name to search"),
+			),
+			mcp.WithString("filePath",
+				mcp.Description("Limit to specific file"),
+			),
+		)
 
-	s.mcpServer.AddTool(searchSymbolTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		args := request.GetArguments()
-		query, ok := args["query"].(string)
-		if !ok {
-			return mcp.NewToolResultError("query must be a string"), nil
-		}
+		s.mcpServer.AddTool(searchSymbolTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			args := request.GetArguments()
+			query, ok := args["query"].(string)
+			if !ok {
+				return mcp.NewToolResultError("query must be a string"), nil
+			}
 
-		opts := router.SearchOptions{Query: query, Strategy: "symbol"}
-		if v, ok := args["filePath"].(string); ok {
-			opts.FilePath = v
-		}
+			opts := router.SearchOptions{Query: query, Strategy: "symbol"}
+			if v, ok := args["filePath"].(string); ok {
+				opts.FilePath = v
+			}
 
-		results, err := searchRouter.Search(ctx, opts)
-		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("search failed: %v", err)), nil
-		}
-		return formatSearchResults(results), nil
-	})
+			results, err := searchRouter.Search(ctx, opts)
+			if err != nil {
+				return mcp.NewToolResultError(fmt.Sprintf("search failed: %v", err)), nil
+			}
+			return formatSearchResults(results), nil
+		})
+	}
 
 	// Call hierarchy tools
 	callersTool := mcp.NewTool("callers",
@@ -844,89 +791,89 @@ func (s *mcpServer) registerTools() error {
 	})
 
 	// Struct usage tools
-	findStructUsageTool := mcp.NewTool("find_struct_usage",
-		mcp.WithDescription("Find all usages of a C/C++ struct type (variable declarations, function parameters, return types, etc.)."),
-		mcp.WithString("structName",
-			mcp.Required(),
-			mcp.Description("Name of the struct to search for"),
-		),
-		mcp.WithString("filePath",
-			mcp.Description("Limit search to a specific file"),
-		),
-		mcp.WithString("language",
-			mcp.Description("Language: 'c' or 'cpp' (default: cpp)"),
-		),
-	)
-
-	s.mcpServer.AddTool(findStructUsageTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		args := request.GetArguments()
-		structName, ok := args["structName"].(string)
-		if !ok {
-			return mcp.NewToolResultError("structName must be a string"), nil
-		}
-
-		var filePath, language string
-		if v, ok := args["filePath"].(string); ok {
-			filePath = v
-		}
-		if v, ok := args["language"].(string); ok {
-			language = v
-		}
-
-		coreLogger.Debug("Executing find_struct_usage for: %s", structName)
-		text, err := tools.FindStructUsage(s.ctx, s.config.workspaceDir, structName, filePath, language)
-		if err != nil {
-			coreLogger.Error("Failed to find struct usage: %v", err)
-			return mcp.NewToolResultError(fmt.Sprintf("failed to find struct usage: %v", err)), nil
-		}
-		return mcp.NewToolResultText(text), nil
-	})
-
-	findStructDefinitionTool := mcp.NewTool("find_struct_definition",
-		mcp.WithDescription("Find the definition/declaration of a C/C++ struct type."),
-		mcp.WithString("structName",
-			mcp.Required(),
-			mcp.Description("Name of the struct to find"),
-		),
-		mcp.WithString("filePath",
-			mcp.Description("Limit search to a specific file"),
-		),
-		mcp.WithString("language",
-			mcp.Description("Language: 'c' or 'cpp' (default: cpp)"),
-		),
-	)
-
-	s.mcpServer.AddTool(findStructDefinitionTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		args := request.GetArguments()
-		structName, ok := args["structName"].(string)
-		if !ok {
-			return mcp.NewToolResultError("structName must be a string"), nil
-		}
-
-		var filePath, language string
-		if v, ok := args["filePath"].(string); ok {
-			filePath = v
-		}
-		if v, ok := args["language"].(string); ok {
-			language = v
-		}
-
-		coreLogger.Debug("Executing find_struct_definition for: %s", structName)
-		text, err := tools.FindStructDefinition(s.ctx, s.config.workspaceDir, structName, filePath, language)
-		if err != nil {
-			coreLogger.Error("Failed to find struct definition: %v", err)
-			return mcp.NewToolResultError(fmt.Sprintf("failed to find struct definition: %v", err)), nil
-		}
-		return mcp.NewToolResultText(text), nil
-	})
-
-	if !debugTools {
-		s.mcpServer.DeleteTools(
-			"search_text", "search_ast", "search_symbol",
-			"ripgrep", "treesitter_query", "treesitter_ast",
-			"find_struct_usage", "find_struct_definition",
+	if debugTools {
+		findStructUsageTool := mcp.NewTool("find_struct_usage",
+			mcp.WithDescription("Find all usages of a C/C++ struct type (variable declarations, function parameters, return types, etc.)."),
+			mcp.WithString("structName",
+				mcp.Required(),
+				mcp.Description("Name of the struct to search for"),
+			),
+			mcp.WithString("filePath",
+				mcp.Description("Limit search to a specific file"),
+			),
+			mcp.WithString("language",
+				mcp.Description("Language: 'c' or 'cpp' (default: cpp)"),
+			),
 		)
-		coreLogger.Info("Debug tools disabled; set MCP_LS_DEBUG_TOOLS=1 to enable all 17 tools")
+
+		s.mcpServer.AddTool(findStructUsageTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			args := request.GetArguments()
+			structName, ok := args["structName"].(string)
+			if !ok {
+				return mcp.NewToolResultError("structName must be a string"), nil
+			}
+
+			var filePath, language string
+			if v, ok := args["filePath"].(string); ok {
+				filePath = v
+			}
+			if v, ok := args["language"].(string); ok {
+				language = v
+			}
+
+			coreLogger.Debug("Executing find_struct_usage for: %s", structName)
+			text, err := tools.FindStructUsage(s.ctx, s.config.workspaceDir, structName, filePath, language)
+			if err != nil {
+				coreLogger.Error("Failed to find struct usage: %v", err)
+				return mcp.NewToolResultError(fmt.Sprintf("failed to find struct usage: %v", err)), nil
+			}
+			return mcp.NewToolResultText(text), nil
+		})
+
+		findStructDefinitionTool := mcp.NewTool("find_struct_definition",
+			mcp.WithDescription("Find the definition/declaration of a C/C++ struct type."),
+			mcp.WithString("structName",
+				mcp.Required(),
+				mcp.Description("Name of the struct to find"),
+			),
+			mcp.WithString("filePath",
+				mcp.Description("Limit search to a specific file"),
+			),
+			mcp.WithString("language",
+				mcp.Description("Language: 'c' or 'cpp' (default: cpp)"),
+			),
+		)
+
+		s.mcpServer.AddTool(findStructDefinitionTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			args := request.GetArguments()
+			structName, ok := args["structName"].(string)
+			if !ok {
+				return mcp.NewToolResultError("structName must be a string"), nil
+			}
+
+			var filePath, language string
+			if v, ok := args["filePath"].(string); ok {
+				filePath = v
+			}
+			if v, ok := args["language"].(string); ok {
+				language = v
+			}
+
+			coreLogger.Debug("Executing find_struct_definition for: %s", structName)
+			text, err := tools.FindStructDefinition(s.ctx, s.config.workspaceDir, structName, filePath, language)
+			if err != nil {
+				coreLogger.Error("Failed to find struct definition: %v", err)
+				return mcp.NewToolResultError(fmt.Sprintf("failed to find struct definition: %v", err)), nil
+			}
+			return mcp.NewToolResultText(text), nil
+		})
+	}
+
+	if debugTools {
+		coreLogger.Info("Debug tools enabled via MCP_LS_DEBUG_TOOLS")
+	}
+	if editsEnabled {
+		coreLogger.Info("Edit tools enabled via MCP_LS_ENABLE_EDITS")
 	}
 
 	coreLogger.Info("Successfully registered all MCP tools")

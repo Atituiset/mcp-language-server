@@ -105,6 +105,8 @@ func (c *Client) handleMessages() {
 			} else {
 				lspLogger.Error("Error reading message: %v", err)
 			}
+			c.markDead()
+			c.failPendingRequests(err)
 			return
 		}
 
@@ -150,7 +152,7 @@ func (c *Client) handleMessages() {
 			}
 
 			// Send response back to server
-			if err := WriteMessage(c.stdin, response); err != nil {
+			if err := c.writeMessage(response); err != nil {
 				lspLogger.Error("Error sending response to server: %v", err)
 			}
 
@@ -191,8 +193,22 @@ func (c *Client) handleMessages() {
 	}
 }
 
+// writeMessage serializes writes to the LSP server's stdin. WriteMessage
+// emits the header and body as two separate writes; without a lock,
+// concurrent writers (tool handlers, watcher callbacks, server-request
+// responses) can interleave them and corrupt the JSON-RPC stream.
+func (c *Client) writeMessage(msg *Message) error {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	return WriteMessage(c.stdin, msg)
+}
+
 // Call makes a request and waits for the response
 func (c *Client) Call(ctx context.Context, method string, params any, result any) error {
+	if !c.Alive() {
+		return fmt.Errorf("LSP server connection is closed, cannot call %s", method)
+	}
+
 	id := c.nextID.Add(1)
 
 	lspLogger.Debug("Making call: method=%s id=%v", method, id)
@@ -217,7 +233,7 @@ func (c *Client) Call(ctx context.Context, method string, params any, result any
 	}()
 
 	// Send request
-	if err := WriteMessage(c.stdin, msg); err != nil {
+	if err := c.writeMessage(msg); err != nil {
 		return fmt.Errorf("failed to send request: %w", err)
 	}
 
@@ -229,6 +245,10 @@ func (c *Client) Call(ctx context.Context, method string, params any, result any
 	case resp = <-ch:
 	case <-ctx.Done():
 		return fmt.Errorf("request %s failed: %w", method, ctx.Err())
+	}
+
+	if resp == nil {
+		return fmt.Errorf("request %s failed: LSP connection closed while waiting for response", method)
 	}
 
 	lspLogger.Debug("Received response for request ID: %v", msg.ID)
@@ -256,6 +276,10 @@ func (c *Client) Call(ctx context.Context, method string, params any, result any
 
 // Notify sends a notification (a request without an ID that doesn't expect a response)
 func (c *Client) Notify(ctx context.Context, method string, params any) error {
+	if !c.Alive() {
+		return fmt.Errorf("LSP server connection is closed, cannot notify %s", method)
+	}
+
 	lspLogger.Debug("Sending notification: method=%s", method)
 
 	msg, err := NewNotification(method, params)
@@ -263,7 +287,7 @@ func (c *Client) Notify(ctx context.Context, method string, params any) error {
 		return fmt.Errorf("failed to create notification: %w", err)
 	}
 
-	if err := WriteMessage(c.stdin, msg); err != nil {
+	if err := c.writeMessage(msg); err != nil {
 		return fmt.Errorf("failed to send notification: %w", err)
 	}
 

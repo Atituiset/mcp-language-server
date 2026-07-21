@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -153,11 +154,14 @@ func (s *mcpServer) start() error {
 	s.searchRouter = router.NewRouterWithClient(s.config.workspaceDir, s.lspClient, cacheTTL...)
 	s.workspaceWatcher.OnFileChange = func(uri string) {
 		s.searchRouter.InvalidateFile(uri)
+		if strings.HasSuffix(uri, "compile_commands.json") {
+			s.searchRouter.InvalidateIncludeMap()
+		}
 	}
 
 	s.mcpServer = server.NewMCPServer(
 		"MCP Language Server",
-		"v0.2.0",
+		"v0.3.0",
 		server.WithLogging(),
 		server.WithRecovery(),
 		server.WithResourceCapabilities(false, true),

@@ -3,11 +3,14 @@
 // (ripgrep / tree-sitter / LSP), with physical-range merging, semantic
 // deduplication, and budget-based payload degradation.
 //
-// Phase 1 deviations from the design doc (documented there):
+// Current deviations from the design doc (documented there):
 //   - No USR: LSP does not expose it; symbol atoms fall back to FQN-style IDs.
-//   - Overlapping (non-contained) ranges are dropped, not LCA-merged.
-//   - rg hits are not expanded to ±2 context lines.
-//   - Symbol atoms carry no FullContent (no per-symbol definition fetch).
+//   - Overlapping (non-contained) ranges are resolved by Priority, not
+//     LCA-merged.
+//
+// Note: snippet expansion (rg hits widened to ±2 lines) and symbol L0
+// payloads (top-5 definitions fetched via LSP) live in the router's
+// normalization producers (internal/tools/router), not in this package.
 package atom
 
 import (

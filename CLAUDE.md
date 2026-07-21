@@ -90,8 +90,6 @@ mcp-language-server/
 │   │   ├── hover.go         # 悬停信息
 │   │   ├── rename-symbol.go  # 重命名符号
 │   │   ├── edit_file.go     # 文本编辑
-│   │   ├── get-codelens.go   # CodeLens 获取
-│   │   ├── execute-codelens.go # CodeLens 执行
 │   │   ├── ripgrep.go       # 文本搜索 (L1)
 │   │   ├── treesitter.go     # Tree-sitter 包装 (L2)
 │   │   ├── call_hierarchy.go # 调用层级查询 (L3)
@@ -207,13 +205,13 @@ Auto 路由规则:
 | `callees` | 查找当前函数调用的函数（支持 depth） |
 | `diagnostics` | 获取文件诊断信息 |
 | `hover` | 获取悬停信息 |
-| `rename_symbol` | 重命名符号 |
+| `rename_symbol` | 重命名符号（需 `MCP_LS_ENABLE_EDITS`，默认不注册） |
 
 ### 其他
 
 | 工具 | 功能 |
 |------|------|
-| `edit_file` | 多重文本编辑 |
+| `edit_file` | 多重文本编辑（需 `MCP_LS_ENABLE_EDITS`，默认不注册） |
 
 ---
 
@@ -427,13 +425,15 @@ Search(query)
 
 - **线程安全**: 使用 `sync.RWMutex`
 - **TTL 过期**: 默认 5 分钟，可配置
-- **缓存键**: 基于 query/strategy/filePath/language 生成
+- **缓存键**: 基于 query/strategy/filePath/language/intent 生成
+- **按文件失效**: 条目带文件依赖集（反向索引），watcher 变更只失效依赖该文件的条目
+- **过期清扫**: 写入时顺带清理过期条目，避免只增不减
 
 ### 缓存键生成
 
 ```go
-func SearchCacheKey(query, strategy, filePath, language string) string {
-    return fmt.Sprintf("%s:%s:%s:%s:", query, strategy, filePath, language)
+func SearchCacheKey(query, strategy, filePath, language, intent string) string {
+    return generateKey(query, strategy, filePath, language, intent) // sha256 截 16 hex
 }
 ```
 
@@ -498,6 +498,9 @@ mcp-language-server --workspace /path/to/project --lsp gopls
 - `LOG_LEVEL=DEBUG` - 详细日志
 - `LOG_FILE=/path/to/log` - 日志文件
 - `LSP_CONTEXT_LINES=5` - 上下文行数
+- `MCP_LS_DEBUG_TOOLS=1` - 追加注册 8 个 debug 工具（search_text/search_ast/search_symbol/ripgrep/treesitter_* 等）
+- `MCP_LS_ENABLE_EDITS=1` - 注册编辑工具 edit_file/rename_symbol（默认只读检视面，不注册）
+- `MCP_LS_CACHE_TTL=300` - 搜索缓存 TTL（秒）
 
 **Claude Desktop 配置示例**:
 
