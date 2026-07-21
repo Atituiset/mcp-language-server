@@ -48,14 +48,14 @@ func runProxy(argv []string) error {
 
 	initReq := mcp.InitializeRequest{}
 	initReq.Params.ProtocolVersion = mcp.LATEST_PROTOCOL_VERSION
-	initReq.Params.ClientInfo = mcp.Implementation{Name: "mcp-language-server-proxy", Version: "0.3.0"}
+	initReq.Params.ClientInfo = mcp.Implementation{Name: "mcp-language-server-proxy", Version: "0.4.0"}
 	if _, err := c.Initialize(ctx, initReq); err != nil {
 		return fmt.Errorf("initialize daemon session: %w", err)
 	}
 
 	srv := server.NewMCPServer(
 		"MCP Language Server",
-		"v0.3.0",
+		"v0.4.0",
 		server.WithRecovery(),
 		server.WithResourceCapabilities(false, true),
 	)

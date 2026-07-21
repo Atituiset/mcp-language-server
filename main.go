@@ -186,7 +186,7 @@ func (s *mcpServer) setup() error {
 	}, s.serverOptions...)
 	s.mcpServer = server.NewMCPServer(
 		"MCP Language Server",
-		"v0.3.0",
+		"v0.4.0",
 		serverOpts...,
 	)
 
