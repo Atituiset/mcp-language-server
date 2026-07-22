@@ -371,6 +371,67 @@ indexing +60s:    RSS=267,280 kB (261 MB ← 稳态，不再增长)
 
 daemon 模式节省的核心逻辑：**clangd 的索引数据结构（AST 缓存、符号表、Preamble）是只读共享的**——一份索引服务所有 proxy 查询。内存与客户端数量解耦。
 
+### 6.6 CPU 占用分析
+
+#### 实测数据（clangd 21, u-boot 6231 TU, 18 核机器）
+
+```
+索引阶段:    40% → 20% → 14% → 10% → 8%  (指数衰减, ~10s 稳定)
+并发查询:     8% (sem=3, 10 goroutines 并发 workspace/symbol)
+references:   8% (首次 91ms, 后续 2-4ms)
+空闲:         7%
+```
+
+索引阶段 CPU 峰值来自 clangd 后台解析所有 TU，衰减到稳定后 CPU 很低。
+
+#### 生产环境外推（14000+ TU）
+
+| 阶段 | u-boot (6231 TU) | 14000+ TU 预估 | 说明 |
+|------|:---:|:---:|------|
+| 索引峰值 CPU | 40% | **80-100%** | 一次性，持续 30-60s |
+| 索引稳态 CPU | 8% | 10-20% | 索引完成后 |
+| 并发查询 CPU | 8% | 15-30% | 取决于 sem 值 |
+| 空闲 CPU | 7% | 5-10% | 基线开销 |
+
+#### CPU 控制手段
+
+**1. clangd worker 线程数 (`-j`)**
+
+clangd 默认 `-j` = CPU 核数。在 32 核机器上索引 14000 TU 会启动 32 个解析线程，直接吃满 CPU。
+
+```bash
+# 限制 clangd 只使用 4 个 worker 线程
+mcp-language-server daemon --workspace /path --lsp clangd -- -j 4
+```
+
+**2. 并发查询上限 (`LSP_MAX_CONCURRENT_REQUESTS`)**
+
+```bash
+LSP_MAX_CONCURRENT_REQUESTS=1  # 查询全串行，CPU 最省
+LSP_MAX_CONCURRENT_REQUESTS=3  # 默认，平衡延迟与 CPU
+```
+
+**3. 后台索引优先级 (`--background-index-priority`)**
+
+```bash
+# 索引使用低优先级（不影响查询响应）
+mcp-language-server daemon ... --lsp clangd -- --background-index-priority=low
+```
+
+**推荐生产配置**：
+
+```bash
+LSP_MAX_CONCURRENT_REQUESTS=3 \
+mcp-language-server daemon \
+  --workspace /path/to/project \
+  --lsp clangd \
+  -- -j 8 --background-index-priority=low
+```
+
+- `-j 8`：索引和查询共用 8 个 worker，不会吃满 32 核
+- `sem=3`：最多 3 个查询并发，防止 burst CPU 尖峰
+- `--background-index-priority=low`：索引让步于查询
+
 ## 7. 参考
 
 - [LSP Specification - Request Ordering](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.17/specification/#requestOrdering)

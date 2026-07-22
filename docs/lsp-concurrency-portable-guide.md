@@ -321,3 +321,36 @@ LSP_MAX_CONCURRENT_REQUESTS=8  →  高性能环境
 - 新部署先跑 `sem=1` 和 `sem=3` 的对比测试
 - 如果两者结果一致 → 用 `sem=3`（查询是线程安全的）
 - 如果 sem=3 出现空结果 → 降至 `sem=1`（该 LSP 版本查询也不线程安全）
+
+## 七、CPU 控制（补充）
+
+多客户端共享单 LSP 时，索引和查询都消耗 CPU。在大项目（10000+ TU）上需要额外控制。
+
+### LSP 层 worker 线程数
+
+多数 LSP 服务器默认 worker 数 = CPU 核数，大项目索引时会吃满 CPU。
+
+| LSP Server | 参数 | 示例 |
+|-----------|------|------|
+| clangd | `-j N` | `clangd -j 8` |
+| rust-analyzer | `--threads N` | `rust-analyzer --threads 4` |
+| gopls | 固定少量线程 | 无需调整 |
+
+### 三层 CPU 控制体系
+
+```
+Layer 1: LSP worker 线程数 (-j N)          → 索引+查询总并发上限
+Layer 2: LSP_MAX_CONCURRENT_REQUESTS (sem) → 客户端查询并发上限
+Layer 3: 后台索引优先级 (--background-index-priority=low) → 索引让步查询
+```
+
+### 推荐生产配置（clangd）
+
+```bash
+LSP_MAX_CONCURRENT_REQUESTS=3 \
+clangd -j 8 --background-index-priority=low
+```
+
+- `-j 8`：索引和查询共用 8 个 worker，32 核机器上不会吃满
+- `sem=3`：最多 3 个客户端查询并发
+- `--background-index-priority=low`：OS 调度优先处理查询
