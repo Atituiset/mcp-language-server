@@ -512,6 +512,7 @@ mcp-language-server proxy  --workspace /path/to/project --lsp clangd
 - `MCP_LS_DEBUG_TOOLS=1` - 追加注册 8 个 debug 工具（search_text/search_ast/search_symbol/ripgrep/treesitter_* 等）
 - `MCP_LS_ENABLE_EDITS=1` - 注册编辑工具 edit_file/rename_symbol（默认只读检视面，不注册）
 - `MCP_LS_CACHE_TTL=300` - 搜索缓存 TTL（秒）
+- `LSP_MAX_CONCURRENT_REQUESTS=3` - LSP 并发请求上限（0=无限、1=全串行、默认 3；见 `docs/lsp-concurrency-design.md`）
 
 **Claude Desktop 配置示例**:
 
