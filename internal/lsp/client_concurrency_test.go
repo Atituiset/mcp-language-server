@@ -24,11 +24,18 @@ func skipIfNoClangd(t *testing.T) {
 	}
 }
 
+func clangdPath() string {
+	if p := os.Getenv("CLANGD_PATH"); p != "" {
+		return p
+	}
+	return "clangd"
+}
+
 func newClangdClient(t *testing.T) *Client {
 	t.Helper()
 	skipIfNoClangd(t)
 
-	c, err := NewClient("clangd",
+	c, err := NewClient(clangdPath(),
 		"--compile-commands-dir="+clangdWorkspace,
 		"--background-index",
 		"--clang-tidy",

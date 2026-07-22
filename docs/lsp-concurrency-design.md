@@ -276,21 +276,54 @@ func (c *Client) OpenFile(ctx context.Context, filepath string) error {
 
 全串行方案被否决的原因：在生产环境中，2-3 个 LLM 同时工作时，慢查询（references ~2s）会堵住快查询（hover ~10ms），体感差异明显。
 
-## 6. 测试策略
+## 6. 实测验证
 
-### 6.1 单元测试
+在 u-boot（176 万行 C，6231 条编译命令）上用真实 clangd 实例进行并发压力测试。
 
-- `TestConcurrentQueries`：多个 goroutine 并发执行 `workspace/symbol`，验证无 race
-- `TestStateMutationBlocksQueries`：`didOpen` 期间查询被阻塞，完成后正常返回
-- `TestSemaphoreLimits`：验证 `LSP_MAX_CONCURRENT_REQUESTS` 生效
+### 6.1 测试用例
 
-### 6.2 集成测试
+| 测试 | 说明 | 源码位置 |
+|------|------|---------|
+| `TestConcurrentSymbolQueries` | 10 个 goroutine 并发执行 `workspace/symbol`，不同符号 | `internal/lsp/client_concurrency_test.go` |
+| `TestConcurrentMixedOperations` | 3 个查询 goroutine + 2 个 didOpen goroutine 交错执行 | 同上 |
+| `TestSemaphoreEnforcement` | 9 查询同时释放，验证 sem=1 串行化 vs sem=3 并发批处理 | 同上 |
 
-- daemon+proxy 模式下多客户端并发访问验证
-- `go test -race ./internal/lsp/...` 确保无数据竞争
+### 6.2 clangd 18.1.3（Ubuntu 24.04 默认）
+
+```
+=== sem=3 (默认，最多 3 并发查询) ===
+TestConcurrentSymbolQueries:  10/10 success, 0 empty, 0 failed in 40.5ms
+TestConcurrentMixedOperations: 15/15 success, 0 failures (sem=3)
+
+=== sem=1 (全串行) ===
+TestConcurrentSymbolQueries:  10/10 success, 0 empty, 0 failed in 89.1ms  (2.2× 慢)
+TestSemaphoreEnforcement:      9 queries in 15.7ms (batch=9, 串行批次验证通过)
+```
+
+### 6.3 clangd 21.1.8（生产环境版本）
+
+```
+=== sem=3 (默认) ===
+TestConcurrentSymbolQueries:  10/10 success, 0 empty, 0 failed in 11.9ms  (比 18 快 3.4×)
+TestConcurrentMixedOperations: 15/15 success, 0 failures
+
+=== sem=1 (全串行) ===
+TestConcurrentSymbolQueries:  10/10 success, 0 empty, 0 failed in 29.4ms  (2.5× 慢于并发模式)
+```
+
+### 6.4 结论
+
+| 维度 | clangd 18 | clangd 21 | 说明 |
+|------|-----------|-----------|------|
+| sem=3 并发延迟 | 40.5ms | **11.9ms** | 21 快 3.4× |
+| sem=1 串行延迟 | 89.1ms | 29.4ms | 1 比 3 慢 2-2.5×，信号量生效 |
+| 结果准确性 | 10/10 ✅ | 10/10 ✅ | 两版本均 0 错误 0 空结果 |
+| 读写隔离 | ✅ | ✅ | didOpen 写锁正确阻塞查询 |
+
+**clangd 21 在并发查询下安全且性能优异**。生产环境可放心使用默认 `LSP_MAX_CONCURRENT_REQUESTS=3`，无需降为 sem=1。
 
 ## 7. 参考
 
 - [LSP Specification - Request Ordering](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.17/specification/#requestOrdering)
-- clangd Architecture: 基于 Clang ASTUnit，不保证线程安全
-- 本仓 benchmarch 文档：`docs/benchmark-2026-07-17.md`
+- [clangd Threads and request handling](https://clangd.llvm.org/design/threads)
+- 本仓 benchmark 文档：`docs/benchmark-2026-07-17.md`
