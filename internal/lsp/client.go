@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -61,6 +62,18 @@ type Client struct {
 	// Files are currently opened by the LSP
 	openFiles   map[string]*OpenFileInfo
 	openFilesMu sync.RWMutex
+
+	// stateMu protects LSP session consistency: queries (RLock) run
+	// concurrently; state mutations (Lock) block all queries during
+	// didOpen/didChange/didClose/didSave.
+	stateMu sync.RWMutex
+
+	// sem is an optional concurrency cap (nil = unlimited). Controlled by
+	// the LSP_MAX_CONCURRENT_REQUESTS environment variable.
+	sem chan struct{}
+
+	// maxConcurrent records the semaphore capacity for logging.
+	maxConcurrent int
 }
 
 func NewClient(command string, args ...string) (*Client, error) {
@@ -83,6 +96,19 @@ func NewClient(command string, args ...string) (*Client, error) {
 		return nil, fmt.Errorf("failed to create stderr pipe: %w", err)
 	}
 
+	// LSP_MAX_CONCURRENT_REQUESTS caps concurrent in-flight LSP requests
+	// (0 = unlimited, 1 = fully serial, default 3).
+	maxConc := 3
+	if v := os.Getenv("LSP_MAX_CONCURRENT_REQUESTS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			maxConc = n
+		}
+	}
+	var sem chan struct{}
+	if maxConc > 0 {
+		sem = make(chan struct{}, maxConc)
+	}
+
 	client := &Client{
 		Cmd:                   cmd,
 		stdin:                 stdin,
@@ -94,6 +120,8 @@ func NewClient(command string, args ...string) (*Client, error) {
 		diagnostics:           make(map[protocol.DocumentUri][]protocol.Diagnostic),
 		diagWaiters:           make(map[protocol.DocumentUri][]chan struct{}),
 		openFiles:             make(map[string]*OpenFileInfo),
+		sem:                   sem,
+		maxConcurrent:         maxConc,
 	}
 
 	// Start the LSP server process

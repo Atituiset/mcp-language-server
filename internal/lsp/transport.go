@@ -203,10 +203,31 @@ func (c *Client) writeMessage(msg *Message) error {
 	return WriteMessage(c.stdin, msg)
 }
 
-// Call makes a request and waits for the response
+// Call makes a request and waits for the response. State-mutation methods
+// (didOpen/didChange/...) acquire the write lock, blocking all concurrent
+// queries; pure queries acquire the read lock and can run concurrently.
 func (c *Client) Call(ctx context.Context, method string, params any, result any) error {
 	if !c.Alive() {
 		return fmt.Errorf("LSP server connection is closed, cannot call %s", method)
+	}
+
+	// Optional concurrency cap (LSP_MAX_CONCURRENT_REQUESTS).
+	if c.sem != nil {
+		select {
+		case c.sem <- struct{}{}:
+			defer func() { <-c.sem }()
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+
+	// Classify and acquire the appropriate lock.
+	if isStateMutation(method) {
+		c.stateMu.Lock()
+		defer c.stateMu.Unlock()
+	} else {
+		c.stateMu.RLock()
+		defer c.stateMu.RUnlock()
 	}
 
 	id := c.nextID.Add(1)
@@ -274,11 +295,21 @@ func (c *Client) Call(ctx context.Context, method string, params any, result any
 	return nil
 }
 
-// Notify sends a notification (a request without an ID that doesn't expect a response)
+// Notify sends a notification (a request without an ID that doesn't expect
+// a response). State-mutation notifications (didOpen/didChange/...) acquire
+// the write lock to prevent interleaving with concurrent queries.
 func (c *Client) Notify(ctx context.Context, method string, params any) error {
 	if !c.Alive() {
 		return fmt.Errorf("LSP server connection is closed, cannot notify %s", method)
 	}
+
+	// State-mutation notifications must block concurrent queries.
+	if isStateMutation(method) {
+		c.stateMu.Lock()
+		defer c.stateMu.Unlock()
+	}
+	// Read-only notifications (e.g. initialized, exit) do not acquire any
+	// stateMu lock. The writeMu below is sufficient for stream integrity.
 
 	lspLogger.Debug("Sending notification: method=%s", method)
 
@@ -296,3 +327,20 @@ func (c *Client) Notify(ctx context.Context, method string, params any) error {
 
 type NotificationHandler func(params json.RawMessage)
 type ServerRequestHandler func(params json.RawMessage) (any, error)
+
+// isStateMutation reports whether the LSP method modifies the server's
+// document state (index / AST cache). State mutations must acquire the
+// write lock to prevent interleaving with concurrent queries.
+func isStateMutation(method string) bool {
+	switch method {
+	case "textDocument/didOpen",
+		"textDocument/didChange",
+		"textDocument/didClose",
+		"textDocument/didSave",
+		"textDocument/willSave",
+		"textDocument/willSaveWaitUntil":
+		return true
+	default:
+		return false
+	}
+}
