@@ -281,6 +281,12 @@ func (r *Router) searchText(ctx context.Context, opts SearchOptions) ([]SearchRe
 }
 
 func (r *Router) searchAST(ctx context.Context, opts SearchOptions) ([]SearchResult, error) {
+	// Try ast-grep first (broader language support, richer patterns).
+	if results, ok := r.tryAstGrep(ctx, opts); ok {
+		return results, nil
+	}
+
+	// Fallback to tree-sitter (zero-dependency, C/C++ only).
 	language := opts.Language
 	if language == "" {
 		language = "cpp"
@@ -315,6 +321,63 @@ func (r *Router) searchAST(ctx context.Context, opts SearchOptions) ([]SearchRes
 	return []SearchResult{
 		{Layer: "ast", Content: result, Count: countLines(result)},
 	}, nil
+}
+
+// tryAstGrep attempts an ast-grep search. It returns (nil, false) when
+// ast-grep is not available or the pattern is clearly a tree-sitter CSP
+// query that ast-grep cannot parse (S-expression style).
+func (r *Router) tryAstGrep(ctx context.Context, opts SearchOptions) ([]SearchResult, bool) {
+	if tools.FindAstGrep() == "" {
+		return nil, false
+	}
+
+	// CSP queries (e.g. "(function_definition) @func") are not valid
+	// ast-grep patterns — let tree-sitter handle them.
+	if strings.HasPrefix(opts.Query, "(") {
+		return nil, false
+	}
+
+	lang := opts.Language
+	if lang == "" && opts.FilePath != "" {
+		lang = tools.DetectAstGrepLang(opts.FilePath)
+	}
+
+	agOpts := tools.AstGrepOptions{Language: lang}
+
+	// IncludeMap scoping for ast-grep (same logic as tree-sitter).
+	if opts.FilePath != "" {
+		if m := r.getIncludeMap(); m != nil {
+			if nb := m.Neighborhood(opts.FilePath); len(nb) > 0 {
+				if len(nb) > maxASTScopeFiles {
+					nb = nb[:maxASTScopeFiles]
+				}
+				var allMatches []tools.AstGrepMatch
+				for _, f := range nb {
+					perFile := tools.AstGrepOptions{Language: lang, Files: []string{f}}
+					if matches, err := tools.SearchAstGrepMatches(ctx, r.workspaceDir, opts.Query, perFile); err == nil {
+						allMatches = append(allMatches, matches...)
+					}
+				}
+				content := fmt.Sprintf("NOTE: expanded to %d files via include map (ast-grep)\n%s", len(nb), formatAstGrepMatches(allMatches))
+				return []SearchResult{
+					{Layer: "ast", Content: content, Count: len(allMatches)},
+				}, true
+			}
+		}
+	}
+
+	// Single file or workspace-wide.
+	if opts.FilePath != "" {
+		agOpts.Files = []string{opts.FilePath}
+	}
+
+	result, err := tools.SearchAstGrep(ctx, r.workspaceDir, opts.Query, agOpts)
+	if err != nil {
+		return nil, false
+	}
+	return []SearchResult{
+		{Layer: "ast", Content: result, Count: countLines(result)},
+	}, true
 }
 
 func (r *Router) searchSymbol(ctx context.Context, opts SearchOptions) ([]SearchResult, error) {
@@ -387,6 +450,12 @@ func (r *Router) searchLayerUnified(ctx context.Context, opts SearchOptions, lay
 		}
 		atoms = atomsFromTextMatches(matches, "rg", exp)
 	case "ast":
+		// Try ast-grep first (broader language support).
+		if sgMatches, err := r.tryAstGrepMatches(ctx, opts); err == nil && len(sgMatches) > 0 {
+			atoms = atomsFromAstGrep(sgMatches)
+			break
+		}
+		// Fallback to tree-sitter.
 		language := opts.Language
 		if language == "" {
 			language = "cpp"
@@ -414,7 +483,7 @@ func (r *Router) searchLayerUnified(ctx context.Context, opts SearchOptions, lay
 			return nil, rgErr
 		}
 		atoms = atomsFromTextMatches(matches, "rg(ast-fallback)", exp)
-		warning = "WARNING: query is not a valid tree-sitter CSP pattern, results are plain text matches"
+		warning = "WARNING: query is not a valid AST pattern, results are plain text matches"
 	case "symbol":
 		symbols, fallback, err := r.querySymbols(ctx, opts.Query)
 		if err != nil {
@@ -477,11 +546,12 @@ func (r *Router) searchAll(ctx context.Context, opts SearchOptions) ([]SearchRes
 
 	var textMatches []tools.TextMatch
 	var astResults []treesitter.QueryResult
+	var astGrepResults []tools.AstGrepMatch
 	var symbols []protocol.WorkspaceSymbolResult
 	var symbolFallback bool
 	errors := []error{}
 
-	wg.Add(3)
+	wg.Add(4)
 	go func() {
 		defer wg.Done()
 		rgOpts, _ := r.textRipgrepOptions(opts, tools.RipgrepOptions{
@@ -500,6 +570,27 @@ func (r *Router) searchAll(ctx context.Context, opts SearchOptions) ([]SearchRes
 			errors = append(errors, err)
 		} else {
 			textMatches = m
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		// Skip ast-grep for CSP-style queries.
+		if strings.HasPrefix(opts.Query, "(") {
+			return
+		}
+		lang := opts.Language
+		if lang == "" && opts.FilePath != "" {
+			lang = tools.DetectAstGrepLang(opts.FilePath)
+		}
+		agOpts := tools.AstGrepOptions{Language: lang}
+		if opts.FilePath != "" {
+			agOpts.Files = []string{opts.FilePath}
+		}
+		matches, err := tools.SearchAstGrepMatches(ctx, r.workspaceDir, opts.Query, agOpts)
+		mu.Lock()
+		defer mu.Unlock()
+		if err == nil && len(matches) > 0 {
+			astGrepResults = matches
 		}
 	}()
 	go func() {
@@ -537,6 +628,7 @@ func (r *Router) searchAll(ctx context.Context, opts SearchOptions) ([]SearchRes
 	var atoms []atom.CodeAtom
 	atoms = append(atoms, atomsFromTextMatches(textMatches, "rg", exp)...)
 	atoms = append(atoms, atomsFromTreeSitter(astResults)...)
+	atoms = append(atoms, atomsFromAstGrep(astGrepResults)...)
 	fileCache := map[string][]byte{}
 	atoms = append(atoms, r.atomsFromSymbols(ctx, symbols, fileCache)...)
 
@@ -794,6 +886,71 @@ func atomKindFromNodeType(nodeType string) atom.Kind {
 	default:
 		return atom.KindSnippet
 	}
+}
+
+// atomsFromAstGrep normalizes ast-grep matches (docs §1: AST pattern matches
+// with native byte ranges, similar to tree-sitter but higher priority since
+// ast-grep supports richer patterns and more languages).
+func atomsFromAstGrep(results []tools.AstGrepMatch) []atom.CodeAtom {
+	atoms := make([]atom.CodeAtom, 0, len(results))
+	for _, m := range results {
+		name := m.Text
+		if len(name) > 60 {
+			name = name[:60]
+		}
+		kind := atom.KindSnippet
+		if strings.Contains(m.Text, "(") {
+			kind = atom.KindFunction
+		}
+		atoms = append(atoms, atom.CodeAtom{
+			SemanticID:  fmt.Sprintf("%s:ast-grep:%d", m.Path, m.StartByte),
+			Name:        name,
+			Kind:        kind,
+			FilePath:    m.Path,
+			StartByte:   m.StartByte,
+			EndByte:     m.EndByte,
+			FullContent: m.Lines,
+			Signature:   truncateLine(strings.TrimSpace(m.Lines), 120),
+			Reference:   fmt.Sprintf("%s:%d: %s", m.Path, m.Line, truncateLine(strings.TrimSpace(m.Text), 60)),
+			SourceTool:  "ast-grep",
+			Priority:    2.5,
+		})
+	}
+	return atoms
+}
+
+// formatAstGrepMatches renders ast-grep matches in grouped file format.
+func formatAstGrepMatches(matches []tools.AstGrepMatch) string {
+	if len(matches) == 0 {
+		return "No matches found"
+	}
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("Found %d matches:\n\n", len(matches)))
+	currentFile := ""
+	for _, m := range matches {
+		if m.Path != currentFile {
+			b.WriteString(fmt.Sprintf("=== %s ===\n", m.Path))
+			currentFile = m.Path
+		}
+		b.WriteString(fmt.Sprintf("  L%d:C%d: %s\n", m.Line, m.Column, truncateLine(strings.TrimSpace(m.Text), 80)))
+	}
+	return b.String()
+}
+
+// tryAstGrepMatches attempts an ast-grep search and returns structured matches.
+func (r *Router) tryAstGrepMatches(ctx context.Context, opts SearchOptions) ([]tools.AstGrepMatch, error) {
+	if tools.FindAstGrep() == "" || strings.HasPrefix(opts.Query, "(") {
+		return nil, fmt.Errorf("ast-grep not available or CSP query")
+	}
+	lang := opts.Language
+	if lang == "" && opts.FilePath != "" {
+		lang = tools.DetectAstGrepLang(opts.FilePath)
+	}
+	agOpts := tools.AstGrepOptions{Language: lang}
+	if opts.FilePath != "" {
+		agOpts.Files = []string{opts.FilePath}
+	}
+	return tools.SearchAstGrepMatches(ctx, r.workspaceDir, opts.Query, agOpts)
 }
 
 func truncateLine(s string, maxLen int) string {

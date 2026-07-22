@@ -581,16 +581,16 @@ func (s *mcpServer) registerTools() error {
 		})
 
 		searchASTTool := mcp.NewTool("search_ast",
-			mcp.WithDescription("Force L2 AST search using tree-sitter. Use for structural patterns, function definitions, AST node types."),
+			mcp.WithDescription("Force L2 AST search using ast-grep (preferred) with tree-sitter fallback. Use for structural patterns, function definitions, AST node types across all languages."),
 			mcp.WithString("query",
 				mcp.Required(),
-				mcp.Description("CSP query pattern (e.g., '(function_definition) @func')"),
+				mcp.Description("AST pattern (e.g., 'func $NAME($$$) { $$$ }' for Go functions, 'struct $NAME { $$$ }' for structs)"),
 			),
 			mcp.WithString("filePath",
 				mcp.Description("Limit to specific file"),
 			),
 			mcp.WithString("language",
-				mcp.Description("Language: 'c' or 'cpp'"),
+				mcp.Description("Language: 'c', 'cpp', 'go', 'python', 'rust', etc. (auto-detected from filePath if not set)"),
 			),
 		)
 
@@ -864,6 +864,56 @@ func (s *mcpServer) registerTools() error {
 			if err != nil {
 				coreLogger.Error("Failed to find struct definition: %v", err)
 				return mcp.NewToolResultError(fmt.Sprintf("failed to find struct definition: %v", err)), nil
+			}
+			return mcp.NewToolResultText(text), nil
+		})
+	}
+
+	// ast-grep: multi-language AST pattern search (debug-only).
+	if debugTools {
+		astgrepTool := mcp.NewTool("astgrep",
+			mcp.WithDescription("Search code using ast-grep AST patterns. Supports Go, Python, Rust, JS/TS, Java and more — not limited to C/C++. Use for structural pattern matching across the entire codebase."),
+			mcp.WithString("pattern",
+				mcp.Required(),
+				mcp.Description("AST pattern to match (e.g., 'func $NAME($$$) { $$$ }', 'class $NAME { $$$ }')"),
+			),
+			mcp.WithString("filePath",
+				mcp.Description("Limit to a specific file"),
+			),
+			mcp.WithString("language",
+				mcp.Description("Language: 'c', 'cpp', 'go', 'python', 'rust', 'typescript', 'javascript', 'java', etc."),
+			),
+		)
+
+		s.mcpServer.AddTool(astgrepTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			args := request.GetArguments()
+			pattern, ok := args["pattern"].(string)
+			if !ok {
+				return mcp.NewToolResultError("pattern must be a string"), nil
+			}
+
+			var filePath, language string
+			if v, ok := args["filePath"].(string); ok {
+				filePath = v
+			}
+			if v, ok := args["language"].(string); ok {
+				language = v
+			}
+
+			if language == "" && filePath != "" {
+				language = tools.DetectAstGrepLang(filePath)
+			}
+
+			opts := tools.AstGrepOptions{Language: language}
+			if filePath != "" {
+				opts.Files = []string{filePath}
+			}
+
+			coreLogger.Debug("Executing astgrep for pattern: %s", pattern)
+			text, err := tools.SearchAstGrep(s.ctx, s.config.workspaceDir, pattern, opts)
+			if err != nil {
+				coreLogger.Error("Failed to run ast-grep: %v", err)
+				return mcp.NewToolResultError(fmt.Sprintf("failed to run ast-grep: %v", err)), nil
 			}
 			return mcp.NewToolResultText(text), nil
 		})
