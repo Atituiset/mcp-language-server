@@ -322,6 +322,55 @@ TestConcurrentSymbolQueries:  10/10 success, 0 empty, 0 failed in 29.4ms  (2.5×
 
 **clangd 21 在并发查询下安全且性能优异**。生产环境可放心使用默认 `LSP_MAX_CONCURRENT_REQUESTS=3`，无需降为 sem=1。
 
+### 6.5 内存占用分析
+
+#### 实测数据
+
+在 u-boot（176 万行 C，6231 TU）上对 clangd 21.1.8 进行 60 秒内存采样：
+
+```
+startup:         RSS=     0 kB
+after initialize: RSS=11,808 kB  (12 MB)
+after didOpen:    RSS=11,808 kB  (warmup 未改变)
+indexing +2s:     RSS=267,280 kB (261 MB ← 索引加载完成，峰值)
+indexing +60s:    RSS=267,280 kB (261 MB ← 稳态，不再增长)
+```
+
+单 TU 平均：261 MB / 6231 ≈ **42 KB/TU**。
+
+#### 生产环境外推
+
+生产环境典型特征：14000+ TU，compile_commands.json 约 500MB（每 TU 编译参数丰富）。
+
+| 因素 | u-boot | 14000+ TU 生产环境 | 倍率 |
+|------|--------|-------------------|------|
+| TU 数量 | 6,231 | 14,000+ | 2.2× |
+| 每 TU include 深度 | C 标准库为主 | 500MB 命令行 → 大量头文件 | 3-10× |
+| 语言 | C（无模板） | C++（模板膨胀）可能性高 | 2-5× |
+| **预估 RSS** | 261 MB | **2-6 GB** | — |
+
+#### daemon 模式 vs 独立模式（32GB 机器）
+
+**保守场景**（类 C 项目，头文件适中）：
+
+| 组件 | daemon 模式 | 独立模式 (3 客户端) | 独立模式 (10 客户端) |
+|------|-----------|-------------------|---------------------|
+| clangd | 1.5 GB ×1 | 1.5 GB ×3 | 1.5 GB ×10 |
+| daemon/proxy | 0.1 GB | 0 GB | 0 GB |
+| **总计** | **1.6 GB (5%)** | 4.5 GB (14%) | 15 GB (47%) |
+
+**激进场景**（C++ 模板重型 + 大量三方库）：
+
+| 组件 | daemon 模式 | 独立模式 (3 客户端) |
+|------|-----------|-------------------|
+| clangd | 5 GB ×1 | 5 GB ×3 |
+| daemon/proxy | 0.15 GB | — |
+| **总计** | **5.2 GB (16%)** | 15 GB → 接近瓶颈 |
+
+即使在最坏情况下（5 GB clangd），daemon 模式在 32GB 机器上仍留有 26 GB 余量给 OS 页缓存和 LLM 推理。独立模式在 3 客户端时就接近 50% 水位，10 客户端直接 OOM。
+
+daemon 模式节省的核心逻辑：**clangd 的索引数据结构（AST 缓存、符号表、Preamble）是只读共享的**——一份索引服务所有 proxy 查询。内存与客户端数量解耦。
+
 ## 7. 参考
 
 - [LSP Specification - Request Ordering](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.17/specification/#requestOrdering)
